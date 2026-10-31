@@ -7,8 +7,8 @@
 ```bash
 shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m    # 1. download
 shilp build -f Shilpfile                                 # 2. reshape (params, template, quant, surgery)
-shilp serve --model qwen2.5-1.5b-instruct:q4_k_m         # 3. serve
-curl localhost:8000/api/chat -d '{"model":"qwen2.5-1.5b-instruct:q4_k_m",
+shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m         # 3. serve
+curl localhost:8000/api/chat -d '{"model":"qwen2.5-1.5b-instruct-gguf:q4_k_m",
   "messages":[{"role":"user","content":"hello"}]}'       # 4. use it
 ```
 
@@ -60,15 +60,14 @@ curl -s localhost:8000/api/chat -d '{"model":"","messages":[{"role":"user","cont
 Requires Python 3.10+, ~2 GB of disk, and — for a GGUF repo — nothing else.
 
 ```bash
-# Apple Silicon: build llama.cpp with Metal
-CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine]"
-# CPU only (Linux, Intel Mac): plain install
-pip install -e ".[engine]"
+# Apple Silicon — build llama.cpp with Metal, or inference is ~10x slower
+CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine,dev]"
+# CPU only (Linux, Intel Mac)
+# pip install -e ".[engine,dev]"
 
-pip install -e .
 shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
 shilp ls
-shilp serve --model qwen2.5-1.5b-instruct:q4_k_m
+shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
 ```
 
 Then:
@@ -76,13 +75,13 @@ Then:
 ```bash
 # Ollama surface — streaming NDJSON
 curl -N localhost:8000/api/chat -d '{
-  "model": "qwen2.5-1.5b-instruct:q4_k_m",
+  "model": "qwen2.5-1.5b-instruct-gguf:q4_k_m",
   "messages": [{"role": "user", "content": "Explain KV cache in two sentences."}]
 }'
 
 # OpenAI surface — SSE, so any OpenAI client works
 curl -N localhost:8000/v1/chat/completions -d '{
-  "model": "qwen2.5-1.5b-instruct:q4_k_m",
+  "model": "qwen2.5-1.5b-instruct-gguf:q4_k_m",
   "messages": [{"role": "user", "content": "Explain KV cache in two sentences."}],
   "stream": true
 }'
@@ -94,7 +93,7 @@ Point an OpenAI SDK at it:
 from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="not-needed")
 print(client.chat.completions.create(
-    model="qwen2.5-1.5b-instruct:q4_k_m",
+    model="qwen2.5-1.5b-instruct-gguf:q4_k_m",
     messages=[{"role": "user", "content": "hello"}],
 ).choices[0].message.content)
 ```
@@ -136,7 +135,7 @@ A model on disk is **content-addressed**: weights live in `blobs/sha256-<hex>`, 
 ```json
 {
   "schemaVersion": 1,
-  "name": "qwen2.5-1.5b-instruct",
+  "name": "qwen2.5-1.5b-instruct-gguf",
   "tag": "q4_k_m",
   "layers": [{ "mediaType": "application/vnd.shilp.gguf", "digest": "sha256:…", "size": 1117320736, "name": "Qwen2.5-1.5B-Instruct-Q4_K_M.gguf" }],
   "params": { "temperature": 0.6, "num_ctx": 8192 },
