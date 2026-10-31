@@ -20,6 +20,29 @@ def _env_path(name: str) -> Path | None:
     return Path(raw).expanduser() if raw else None
 
 
+def load_dotenv(path: Path) -> int:
+    """Read `KEY=VALUE` lines from `path` into the environment.
+
+    Real environment variables always win (`setdefault`), so a shell export or a
+    host that injects secrets is never overridden by a stray file. Returns how
+    many keys were set, which is what `shilp doctor` reports.
+    """
+    if not path.is_file():
+        return 0
+    applied = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+        applied += 1
+    return applied
+
+
 @dataclass(frozen=True)
 class Settings:
     """Everything the process needs to find its files and its engine."""
@@ -42,6 +65,8 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        # `.env` in the working directory, unless SHILP_ENV_FILE points elsewhere.
+        load_dotenv(_env_path("SHILP_ENV_FILE") or Path.cwd() / ".env")
         return cls(
             home=_env_path("SHILP_HOME") or DEFAULT_HOME,
             llamacpp_dir=_env_path("SHILP_LLAMACPP_DIR"),
