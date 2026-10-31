@@ -48,7 +48,7 @@ git clone https://github.com/vkdev01/shilp && cd shilp
 make up
 ```
 
-`make up` is `make setup` → `make pull` → `make serve`: a venv, the dependencies, a `.env`, a doctor report, a ~1 GB model, and a server on `:8000`. It detects Apple Silicon and builds llama.cpp with Metal — the difference between ~50 tok/s and ~4.
+`make up` is `make setup` → `make pull` → `make serve`: a venv, the dependencies, a `.env`, a doctor report, a ~800 MB model (Gemma 3 1B), and a server on `:8000`. It detects Apple Silicon and builds llama.cpp with Metal — the difference between ~50 tok/s and ~4.
 
 `make help` lists every target. Requires Python 3.10+ and, on a Mac, Xcode command line tools (the engine compiles C++ at install time).
 
@@ -57,7 +57,7 @@ make up
 ```bash
 make setup    # venv, deps, .env, then report what this machine has
 make test     # 78 tests, no model, no network
-make pull     # Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB
+make pull     # Gemma-3-1B-it Q4_K_M, ~800 MB
 make serve    # http://127.0.0.1:8000 — chat UI at /chat
 ```
 

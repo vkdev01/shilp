@@ -10,8 +10,8 @@ PY = $(if $(wildcard $(VENV)/bin/python),$(VENV)/bin/python,python3)
 
 # --- what to install and serve ----------------------------------------
 EXTRAS ?= engine,dev
-MODEL  ?= hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
-REF    ?= qwen2.5-1.5b-instruct-gguf:q4_k_m
+MODEL  ?= hf:bartowski/google_gemma-3-1b-it-GGUF:q4_k_m
+REF    ?= google_gemma-3-1b-it-gguf:q4_k_m
 
 # --- platform ---------------------------------------------------------
 # Metal is the difference between ~50 tok/s and ~4 tok/s on an Apple Silicon
@@ -43,7 +43,7 @@ setup: venv env ## End-to-end install: venv, dependencies, .env, doctor
 	@$(PY) -m shilp.cli doctor
 	@echo ""
 	@echo "Next:  make test     # 78 tests, no model needed"
-	@echo "       make pull     # ~1 GB model from the Hub"
+	@echo "       make pull     # ~800 MB model from the Hub"
 	@echo "       make serve    # http://127.0.0.1:8000"
 	@echo "  or:  make up       # pull + serve in one step"
 
