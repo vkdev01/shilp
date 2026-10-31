@@ -21,7 +21,8 @@ import typer
 from . import __version__
 from .config import Settings, get_settings
 from .export import materialise
-from .hub import HfSpec, HubError, preview, pull
+from .hub import HfSpec, HubError, preview
+from .hub import pull as hub_pull
 from .modelfile import ShilpfileError, parse_file
 from .modify.convert import convert_to_gguf
 from .modify.merge import merge_lora
@@ -97,7 +98,7 @@ def pull(
             for item in info["files"]:
                 _ok(f"  {human_size(item['size']):>9}  {item['name']}")
             return
-        manifest = pull(_store(), spec, token=settings.hf_token, name=name, tag=tag)
+        manifest = hub_pull(_store(), spec, token=settings.hf_token, name=name, tag=tag)
     except (HubError, MissingDependency, ShilpError) as exc:
         _fail(str(exc))
         raise typer.Exit(1)
@@ -191,7 +192,7 @@ def build(
         if store.exists(name or hf_spec.repo_id.split("/")[-1].lower()):
             base = store.resolve(name or hf_spec.repo_id.split("/")[-1].lower())
         else:
-            base = pull(store, hf_spec, token=settings.hf_token)
+            base = hub_pull(store, hf_spec, token=settings.hf_token)
         parent = _digest(base)
     elif source.endswith(".gguf"):
         path = (file.parent / source).resolve()
