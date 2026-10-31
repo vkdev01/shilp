@@ -1,0 +1,36 @@
+# A Shilpfile describes a model in one readable file.
+#
+#   shilp build -f Shilpfile.example --tag terse
+#   shilp show <name>:terse
+#
+# Directives: FROM, PARAMETER, TEMPLATE, SYSTEM, ADAPTER.
+# Values may be "quoted" or """triple-quoted""" for multi-line. # starts a comment.
+
+# FROM takes one of three things:
+#   hf:org/repo[:quant]   a Hugging Face repo (pulled first if it is not local)
+#   name:tag              an existing model — its layers are reused, not copied
+#   ./local.gguf          a file on disk
+FROM hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
+
+# Sampling defaults. A request may override any of these per call.
+PARAMETER temperature 0.6
+PARAMETER top_p 0.95
+PARAMETER top_k 40
+PARAMETER repeat_penalty 1.1
+PARAMETER num_ctx 8192
+PARAMETER num_predict 512
+
+# Stop sequences: repeat the directive, one per sequence.
+PARAMETER stop "<|im_end|>"
+
+SYSTEM """You are a terse technical assistant. One sentence unless asked for more.
+If you do not know, say so instead of guessing."""
+
+# Ollama-style template. Supported variables: {{ .System }}, {{ .Prompt }},
+# {{ .Response }}. Leave this out to use the template inside the GGUF file.
+TEMPLATE """<|im_start|>system
+{{ .System }}<|im_end|>
+<|im_start|>user
+{{ .Prompt }}<|im_end|>
+<|im_start|>assistant
+"""
