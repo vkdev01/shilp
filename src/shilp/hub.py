@@ -106,7 +106,9 @@ class HfHub:
     def list_files(self, spec: HfSpec, token: str | None = None) -> list[HubFile]:
         api = self._api()
         try:
-            info = api.model_info(spec.repo_id, revision=spec.revision, token=token)
+            info = api.model_info(
+                spec.repo_id, revision=spec.revision, token=token, files_metadata=True
+            )
         except Exception as exc:
             raise HubError(f"cannot read {spec.repo_id}@{spec.revision}: {exc}") from exc
         files: list[HubFile] = []
