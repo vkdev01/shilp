@@ -41,13 +41,39 @@ Design decisions and their trade-offs are in [docs/architecture.md](docs/archite
 
 ## Quickstart
 
-### Without a model (30 seconds)
-
-The whole HTTP surface runs against a deterministic fake engine, so you can see the API before downloading 1 GB of weights:
+### One command
 
 ```bash
-pip install -e ".[dev]"
-SHILP_ENGINE=fake shilp serve --port 8000
+git clone https://github.com/vkdev01/shilp && cd shilp
+make up
+```
+
+`make up` is `make setup` → `make pull` → `make serve`: a venv, the dependencies, a `.env`, a doctor report, a ~1 GB model, and a server on `:8000`. It detects Apple Silicon and builds llama.cpp with Metal — the difference between ~50 tok/s and ~4.
+
+`make help` lists every target. Requires Python 3.10+ and, on a Mac, Xcode command line tools (the engine compiles C++ at install time).
+
+### Or step by step
+
+```bash
+make setup    # venv, deps, .env, then report what this machine has
+make test     # 69 tests, no model, no network
+make pull     # Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB
+make serve    # http://127.0.0.1:8000
+```
+
+Override what gets pulled and served without editing anything:
+
+```bash
+make up MODEL=hf:bartowski/Llama-3.2-3B-Instruct-GGUF:q4_k_m \
+        REF=llama-3.2-3b-instruct-gguf:q4_k_m
+```
+
+### Without a model, or without make
+
+The whole HTTP surface runs against a deterministic fake engine, so you can see the API before downloading anything:
+
+```bash
+make demo                        # or: pip install -e ".[dev]" && SHILP_ENGINE=fake shilp serve
 ```
 
 ```bash
@@ -55,19 +81,14 @@ curl -s localhost:8000/api/tags
 curl -s localhost:8000/api/chat -d '{"model":"","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
-### With a real model
-
-Requires Python 3.10+, ~2 GB of disk, and — for a GGUF repo — nothing else.
+Manual equivalent of `make setup`, if you would rather see each step:
 
 ```bash
-# Apple Silicon — build llama.cpp with Metal, or inference is ~10x slower
-CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine,dev]"
-# CPU only (Linux, Intel Mac)
-# pip install -e ".[engine,dev]"
-
-shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
-shilp ls
-shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
+python3 -m venv .venv && source .venv/bin/activate
+CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine,dev]"   # Apple Silicon
+# pip install -e ".[engine,dev]"                             # CPU only
+cp .env.example .env
+shilp doctor
 ```
 
 Then:
