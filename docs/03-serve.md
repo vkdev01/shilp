@@ -13,6 +13,16 @@ shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
 
 Open `http://127.0.0.1:8000` in a browser for a status page: stored models, which one is resident, and the endpoints.
 
+Open `http://127.0.0.1:8000/chat` for a chat client. It calls the public API and nothing else, so it doubles as a manual test bench:
+
+- **API surface toggle** — send through Ollama `/api/chat` (NDJSON) or OpenAI `/v1/chat/completions` (SSE); the conversation carries over when you switch.
+- **Settings** — model, system prompt, temperature, max tokens, streaming on/off. They persist in `localStorage`.
+- **Per-reply stats** — completion tokens, tok/s, time to first token, wall time; *Stop* aborts mid-stream.
+- **Last request** — the exact call as a copyable `curl`, plus the raw response body or stream.
+- **Theme** — light and dark, following the OS until you toggle.
+
+Markup lives in `server/templates/` (Jinja2) and styling and scripts in `server/static/`; `server/ui.py` only gathers the data each page renders.
+
 ```bash
 shilp serve --engine fake --port 8000     # no model, deterministic output — for UI work
 SHILP_MAX_RESIDENT=2 shilp serve          # keep two models warm, if you have the RAM

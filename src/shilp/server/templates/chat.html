@@ -1,0 +1,133 @@
+{% extends "base.html" %}
+{% block title %}Chat{% endblock %}
+
+{% block content %}
+<div class="chat-layout">
+  <aside class="sidebar" aria-label="Chat settings">
+    <form class="settings" id="settings" autocomplete="off">
+      <fieldset class="field">
+        <legend class="label">API surface</legend>
+        <div class="segmented" role="radiogroup">
+          <label>
+            <input type="radio" name="surface" value="ollama" checked>
+            <span>Ollama <small>/api/chat</small></span>
+          </label>
+          <label>
+            <input type="radio" name="surface" value="openai">
+            <span>OpenAI <small>/v1/chat/completions</small></span>
+          </label>
+        </div>
+      </fieldset>
+
+      <div class="field">
+        <div class="label-row">
+          <label class="label" for="model">Model</label>
+          <button class="link-btn" type="button" id="refresh-models" title="Reload from /api/tags">Refresh</button>
+        </div>
+        <select id="model" name="model" {% if not models %}disabled{% endif %}>
+          {% for m in models %}
+          <option value="{{ m.ref }}">{{ m.ref }} · {{ m.size }}</option>
+          {% else %}
+          <option value="">No models stored</option>
+          {% endfor %}
+        </select>
+        <p class="hint" id="model-hint" {% if models %}hidden{% endif %}>
+          Pull one first: <code>make pull</code>
+        </p>
+      </div>
+
+      <div class="field">
+        <label class="label" for="system">System prompt</label>
+        <textarea id="system" name="system" rows="3"
+                  placeholder="Optional — e.g. You are a terse technical assistant."></textarea>
+      </div>
+
+      <div class="field">
+        <div class="label-row">
+          <label class="label" for="temperature">Temperature</label>
+          <output id="temperature-value" for="temperature">0.7</output>
+        </div>
+        <input type="range" id="temperature" name="temperature" min="0" max="2" step="0.05" value="0.7">
+      </div>
+
+      <div class="field">
+        <label class="label" for="max-tokens">Max tokens</label>
+        <input type="number" id="max-tokens" name="max_tokens" min="1" max="8192" step="1"
+               placeholder="model default">
+      </div>
+
+      <label class="switch">
+        <input type="checkbox" id="stream" name="stream" checked>
+        <span class="switch-track" aria-hidden="true"></span>
+        <span>Stream tokens</span>
+      </label>
+
+      <button class="btn btn-ghost full" type="button" id="new-chat">New chat</button>
+    </form>
+
+    <details class="inspector" id="inspector">
+      <summary>Last request</summary>
+      <p class="hint" id="req-meta">Nothing sent yet.</p>
+      <div class="code-block">
+        <div class="code-head"><span>curl</span><button class="link-btn" type="button" data-copy="#req-curl">Copy</button></div>
+        <pre id="req-curl"></pre>
+      </div>
+      <div class="code-block">
+        <div class="code-head"><span>Response (raw)</span><button class="link-btn" type="button" data-copy="#res-raw">Copy</button></div>
+        <pre id="res-raw"></pre>
+      </div>
+    </details>
+  </aside>
+
+  <section class="chat" aria-label="Conversation">
+    <div class="messages" id="messages" aria-live="polite">
+      <div class="empty-state" id="empty-state">
+        <div class="empty-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 32" width="40" height="40"><rect width="32" height="32" rx="8"/><path d="M9 22l7-12 7 12z"/></svg>
+        </div>
+        <h2>Talk to your model</h2>
+        <p class="muted">
+          Messages go to the API you pick on the left — the same endpoints any client uses.
+          Open <em>Last request</em> to see the exact call.
+        </p>
+        <div class="suggestions">
+          <button type="button" class="chip" data-suggest="Explain what a KV cache is in two sentences.">What is a KV cache?</button>
+          <button type="button" class="chip" data-suggest="What is the capital of France?">Capital of France?</button>
+          <button type="button" class="chip" data-suggest="Write a haiku about quantization.">Haiku about quantization</button>
+        </div>
+      </div>
+    </div>
+
+    <form class="composer" id="composer">
+      <textarea id="prompt" rows="1" placeholder="Send a message…  (Enter to send, Shift+Enter for a new line)"
+                aria-label="Message" required></textarea>
+      <button class="btn btn-primary" type="submit" id="send">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 12l16-8-6 16-2-7z"/></svg>
+        Send
+      </button>
+      <button class="btn btn-danger" type="button" id="stop" hidden>
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        Stop
+      </button>
+    </form>
+  </section>
+</div>
+
+<template id="message-template">
+  <article class="message">
+    <div class="avatar" aria-hidden="true"></div>
+    <div class="bubble">
+      <div class="message-head">
+        <span class="role"></span>
+        <button class="link-btn copy-message" type="button" hidden>Copy</button>
+      </div>
+      <div class="content"></div>
+      <div class="meta" hidden></div>
+    </div>
+  </article>
+</template>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/chat.js?v={{ version }}" defer></script>
+{% endblock %}

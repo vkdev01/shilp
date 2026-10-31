@@ -56,9 +56,9 @@ make up
 
 ```bash
 make setup    # venv, deps, .env, then report what this machine has
-make test     # 69 tests, no model, no network
+make test     # 78 tests, no model, no network
 make pull     # Qwen2.5-1.5B-Instruct Q4_K_M, ~1 GB
-make serve    # http://127.0.0.1:8000
+make serve    # http://127.0.0.1:8000 — chat UI at /chat
 ```
 
 Override what gets pulled and served without editing anything:
@@ -200,7 +200,10 @@ src/shilp/
     loader.py       one resident model, LRU eviction, reference counting
     template.py     render Ollama-style templates to a prompt
   server/
-    app.py          create_app, error translation, health, metrics, status page
+    app.py          create_app, error translation, health, metrics
+    ui.py           browser pages: status at /, chat client at /chat
+    templates/      Jinja2 pages (base, status, chat)
+    static/         theme CSS (light + dark) and the chat/theme scripts
     routes_ollama.py  /api/chat, /api/generate, /api/tags, /api/pull, …
     routes_openai.py  /v1/chat/completions, /v1/models, /v1/embeddings
     generate.py     the single generation path both surfaces share
@@ -216,7 +219,7 @@ Every module opens with a doc comment saying what it is for and, where it matter
 ## Testing
 
 ```bash
-make test     # 64 unit tests, no model, no network
+make test     # 78 unit tests, no model, no network
 make smoke    # boots a real uvicorn server and exercises every endpoint over HTTP
 make lint     # ruff, if installed
 ```

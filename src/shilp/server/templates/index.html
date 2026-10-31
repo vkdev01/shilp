@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{% block title %}Status{% endblock %}
+
+{% block content %}
+<section class="container stack">
+  <div class="hero">
+    <div>
+      <h1>A model server you can read.</h1>
+      <p class="muted">
+        Engine <span class="badge">{{ engine }}</span>
+        · Resident:
+        {% if resident %}
+          {% for ref in resident %}<code>{{ ref }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+        {% else %}
+          <span>none</span>
+        {% endif %}
+      </p>
+    </div>
+    <a class="btn btn-primary" href="/chat">Open chat</a>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>Models</h2>
+      <span class="muted small">{{ models | length }} stored</span>
+    </div>
+    <div class="table-wrap">
+      <table class="table">
+        <thead>
+          <tr><th>Model</th><th>Quant</th><th>Size</th><th>Source</th><th></th></tr>
+        </thead>
+        <tbody>
+          {% for m in models %}
+          <tr>
+            <td><code>{{ m.ref }}</code></td>
+            <td>{{ m.quantization }}</td>
+            <td>{{ m.size }}</td>
+            <td class="muted">{{ m.source }}</td>
+            <td class="right"><a class="link" href="/chat?model={{ m.ref | urlencode }}">Chat →</a></td>
+          </tr>
+          {% else %}
+          <tr>
+            <td colspan="5" class="empty">
+              No models yet — run <code>shilp pull hf:org/model-GGUF:q4_k_m</code>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="grid-3">
+    <div class="card">
+      <h3>Ollama</h3>
+      <ul class="plain">
+        <li><code>POST /api/chat</code></li>
+        <li><code>POST /api/generate</code></li>
+        <li><a href="/api/tags"><code>GET /api/tags</code></a></li>
+        <li><code>POST /api/pull</code></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>OpenAI</h3>
+      <ul class="plain">
+        <li><code>POST /v1/chat/completions</code></li>
+        <li><a href="/v1/models"><code>GET /v1/models</code></a></li>
+      </ul>
+    </div>
+    <div class="card">
+      <h3>Ops</h3>
+      <ul class="plain">
+        <li><a href="/health"><code>/health</code></a></li>
+        <li><a href="/metrics"><code>/metrics</code></a></li>
+        <li><a href="/api/usage"><code>/api/usage</code></a></li>
+        <li><a href="/api/ps"><code>/api/ps</code></a></li>
+      </ul>
+    </div>
+  </div>
+
+  <p class="muted small">
+    Point any OpenAI client at <code>http://127.0.0.1:{{ port }}/v1</code>.
+  </p>
+</section>
+{% endblock %}

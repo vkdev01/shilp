@@ -42,7 +42,7 @@ setup: venv env ## End-to-end install: venv, dependencies, .env, doctor
 	@echo ""
 	@$(PY) -m shilp.cli doctor
 	@echo ""
-	@echo "Next:  make test     # 69 tests, no model needed"
+	@echo "Next:  make test     # 78 tests, no model needed"
 	@echo "       make pull     # ~1 GB model from the Hub"
 	@echo "       make serve    # http://127.0.0.1:8000"
 	@echo "  or:  make up       # pull + serve in one step"
