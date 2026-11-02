@@ -9,7 +9,7 @@ version, wired to the `Engine` protocol. Read that first if you want the
 concepts; read this if you want the integration.
 
 **What you give up compared to the llama.cpp engine**, stated up front because
-it is the whole point of docs/00-theory.md:
+it is the whole point of the theory doc (private: vkdev01/shilp-docs, 00-theory.md):
 
 * No quantisation. Weights are dense fp32/fp16/bf16, so a 7B model needs
   ~14 GiB instead of ~4.4 GiB, and decode is 3–7× slower (it is bandwidth-bound;
@@ -219,7 +219,7 @@ class TransformersEngine:
                 payload, tokenize=False, add_generation_prompt=True
             )
         # 3. last resort: a format the model has never seen. This is the failure
-        #    mode described in docs/00-theory.md §3.3 — it works, by luck.
+        #    mode described in 00-theory.md §3.3 — it works, by luck.
         return (system + "\n" if system else "") + (
             f"Q: {turns[-1].content if turns else ''}\nA:"
         )
