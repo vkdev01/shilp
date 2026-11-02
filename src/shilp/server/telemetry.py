@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +44,9 @@ class RequestRecord:
     endpoint: str
     model: str
     stream: bool
-    started: float = time.monotonic()
+    # A factory, not `= time.monotonic()`: a plain default is evaluated once, at
+    # import, which made every duration "time since the server started".
+    started: float = field(default_factory=time.monotonic)
     first_token_at: float | None = None
     finished: float | None = None
     prompt_tokens: int = 0
