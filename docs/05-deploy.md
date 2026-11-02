@@ -24,6 +24,8 @@ Clients do not integrate with *your* server. They integrate with a contract, and
 
 shilp implements the first five in both dialects — Ollama's NDJSON and OpenAI's SSE — from one generation path, so a bug in one surface is a bug in one route rather than two implementations that disagree. What it does **not** do, and what you must add before exposing it, is everything in §8 and §9.
 
+One detail of the error contract is easy to get wrong with streaming, and it is worth knowing why shilp does it the way it does. A streaming response commits to `200` the moment its headers leave. So shilp waits for the **first token before sending headers**: anything that fails earlier — unknown model (404), a busy model (503), a prompt longer than the context window (400) — comes back as a real status code with a JSON body. Anything that fails *after* the first token can no longer change the status, so it ends the stream with an error frame instead: `{"error": "…"}` on the Ollama surface (what Ollama itself sends) and `data: {"error": {…}}` with no `[DONE]` on the OpenAI surface (the OpenAI SDKs raise on it). A client that treats "stream ended without `done`/`[DONE]`" as a failure is then always right.
+
 The honest framing: matching the API is a weekend. Matching the *operational* contract — auth, quotas, rate limits, retries, graceful degradation — is the actual work of being a provider.
 
 ---
@@ -33,21 +35,21 @@ The honest framing: matching the API is a weekend. Matching the *operational* co
 Four commands, from nothing to an endpoint a client can call:
 
 ```bash
-pip install -e ".[engine]"
-shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
-shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m --host 0.0.0.0 --port 8000
+pip install -e ".[engine]"        # on Apple Silicon: CMAKE_ARGS="-DGGML_METAL=on" first
+shilp pull hf:bartowski/google_gemma-3-1b-it-GGUF:q4_k_m
+shilp serve --model google_gemma-3-1b-it-gguf:q4_k_m --host 0.0.0.0 --port 8000
 ```
 
 ```python
 from openai import OpenAI
 client = OpenAI(base_url="http://your-host:8000/v1", api_key="unused")
 print(client.chat.completions.create(
-    model="qwen2.5-1.5b-instruct-gguf:q4_k_m",
+    model="google_gemma-3-1b-it-gguf:q4_k_m",
     messages=[{"role": "user", "content": "hello"}],
 ).choices[0].message.content)
 ```
 
-That is a working private endpoint. Everything below is about what happens when the second user arrives.
+That is a working private endpoint. Everything below is about what happens when the second user arrives. (The examples use the Makefile's default model; any GGUF works the same way. `--host 0.0.0.0` exposes it to your network with no authentication — read §9 before you do that anywhere but a lab.)
 
 Two decisions to make before you start, because they are expensive to reverse:
 
@@ -65,10 +67,13 @@ Two decisions to make before you start, because they are expensive to reverse:
 | **Single VM, CPU** | always on, a real IP | 5–15 tok/s for a 7B; fine for a team, not for a product |
 | **Single VM, one GPU** | 30–80 tok/s single stream; the realistic starting point | GPU rental, driver/CUDA setup, one model per process |
 | **One GPU, several models** | routing by task | memory, and shilp holds one model resident by default |
-| **N replicas behind a proxy** | linear throughput, rolling restarts | each replica loads its own copy of the weights |
-| **GPU cluster + vLLM** | continuous batching, 10×+ throughput | real ops work; no longer a laptop project |
+| **One box, `llama-server` with parallel slots** | continuous batching on the same GGUF, including on Apple Silicon | a different server process; the context is divided between slots |
+| **N replicas behind a proxy** | linear throughput, rolling restarts | each replica holds its own KV cache (and, on a GPU, its own copy of the weights) |
+| **GPU cluster + vLLM** | paged attention, continuous batching at high concurrency | CUDA/ROCm only — no Metal; real ops work; no longer a laptop project |
 
 The jump that matters is the last one. Everything up to "N replicas" is a stateless web service with an unusually large binary asset; the cluster tier is a different discipline.
+
+The `llama-server` row is the rung most guides skip, and it is the natural next step *for this project*: it reads the same GGUF files shilp stores, and its `--parallel N` slots batch several sequences per weight read — the concurrency lever of §4.3 — without leaving llama.cpp or the Mac. shilp's engine protocol is shaped so an engine that forwards to a local `llama-server` is one new file (see the [roadmap](04-roadmap.md)).
 
 A useful test of where you are: **if a request can take 20 seconds, you are not serving a web app, you are serving a job queue that happens to speak HTTP.** Design accordingly — timeouts, streaming, and admission control matter more than request throughput.
 
@@ -98,6 +103,17 @@ The middle term is the one people forget, because it is *per session* and grows 
 
 Twenty users with generous context cost as much memory as the weights themselves. This is the single most common capacity surprise, and it is why "it ran fine in testing" and "it OOMs under load" are both true.
 
+**The per-token figure is an architecture choice, and it varies ~20×.** It is `2 × layers × kv_heads × head_dim × bytes` (§2.3 of [00-theory.md](00-theory.md)), and *grouped-query attention* — fewer KV heads than query heads — is what moves it. **Computed** at fp16, from each model's published config:
+
+| Model | Layers | KV heads × dim | KV per token | 4k-context sessions per GiB of KV |
+|---|---|---|---|---|
+| Llama-2-7B (no GQA) | 32 | 32 × 128 | 512 KiB | 0.5 |
+| Llama-3-8B | 32 | 8 × 128 | 128 KiB | 2 |
+| Qwen2.5-7B | 28 | 4 × 128 | 56 KiB | 4.6 |
+| Gemma-3-1B (shilp's default) | 26 | 1 × 256 | 26 KiB | 9.8 |
+
+Read the last column as *concurrency per gigabyte*. Two 7B-class models with the same weights footprint can differ 9× in how many simultaneous users fit, which makes KV-per-token a model-selection criterion for serving, not a footnote. Two further levers exist in llama.cpp and are not yet exposed by shilp: **KV-cache quantisation** (`q8_0` keys and values roughly halve the cache, at a small quality cost; a quantised V cache needs flash attention) and **sliding-window attention** for models that use it — Gemma 3 restricts most layers to a 512-token window, but the llama.cpp build measured here logs `using full-size SWA cache`, so that saving is not realised by default.
+
 Full budget for 7B at 8k context, **computed**:
 
 | Precision | Weights | KV | Runtime | Total | Fits 8 GB? | 16 GB? |
@@ -125,23 +141,27 @@ single-stream ceiling ≈ memory_bandwidth / model_size_in_bytes
 
 Real throughput lands at 50–70% of the ceiling. If you measure far below it, the model is not in memory (it is being re-read from disk) or the kernels are not vectorised for your CPU.
 
+**Measured**, to check the model against a real machine: Gemma-3-1B Q4_K_M (0.81 GB) on an M3 Pro (150 GB/s) has a ceiling of ~186 tok/s and decodes at **98.7 tok/s** with every layer on the GPU — 53% of the ceiling, inside the predicted band. With the same build forced onto the CPU it decodes at 84.5 tok/s. That 17% gap is small *because* decode is bandwidth-bound and Apple's CPU and GPU share the same memory; the difference shows up in prefill instead (§4.6).
+
 ### 4.3 Concurrency: what happens when a second user arrives
 
-This is where CPU and GPU diverge completely, and where most intuition is wrong.
+This is where most intuition is wrong, and the deciding factor is not CPU versus GPU — it is **whether the engine batches**.
 
-**On CPU (llama.cpp, one slot):** requests **serialise**. There is no batching, so N concurrent streams each get roughly 1/N of the single-stream rate.
+**Without batching (shilp today, on any hardware):** one `llama.cpp` context per model, guarded by a lock, so requests for the same model run **one after another, first come first served**. The intuitive picture — "four users each get a quarter of the speed" — is not what happens. **Measured** on an M3 Pro with Gemma-3-1B, four identical requests fired at once:
 
-| Concurrent | M2 Pro, 7B Q4_K_M |
-|---|---|
-| 1 | ~43 tok/s |
-| 4 | ~11 tok/s each |
-| 16 | ~2.7 tok/s each |
+| Request | Waited before its first token | Streamed at | Finished after |
+|---|---|---|---|
+| 1st | 0.0 s | 99 tok/s | 1.6 s |
+| 2nd | 1.6 s | 97 tok/s | 3.2 s |
+| 3rd | 3.2 s | 95 tok/s | 4.7 s |
+| 4th | 4.7 s | 92 tok/s | 6.3 s |
+| **Aggregate** | | **96 tok/s** — the same as one user | |
 
-**Aggregate throughput is flat.** You are not serving 16 users faster; you are serving them slower, together. Past a small number, each user's answer takes so long that they leave. That is the honest reason a laptop is not a server.
+Every user gets full speed *once they start*; the cost is paid entirely as waiting, and it grows linearly with your position: `wait_k ≈ (k − 1) × service_time`. Aggregate throughput is flat — you are not serving four users faster, you are serving them in turn. Time-slicing would give the same aggregate but spread the pain evenly; FIFO gives the first user a great experience and the last a bad one, which is why **p95 time-to-first-token, not average tok/s, is the number that degrades first** under load. That is the honest reason a laptop is not a server.
 
-**On GPU with continuous batching (vLLM):** the opposite. Reading the weights once serves many sequences, so aggregate throughput rises with load and per-stream speed degrades mildly. This is why a GPU's advantage is a *concurrency* advantage, not a single-request one.
+**With continuous batching** (`llama-server --parallel N`, vLLM): the opposite curve. One read of the weights advances every active sequence, so aggregate throughput *rises* with load until compute saturates, while per-stream speed falls gently. A useful floor for how far to push it: people read at roughly 5–8 tokens per second, so a stream above ~10 tok/s already feels instant, and batching that trades 99 tok/s for one user into 15 tok/s each for six users is a good trade for chat. This is why a GPU's advantage is a *concurrency* advantage, not a single-request one.
 
-shilp implements neither batching nor a queue: `SHILP_MAX_RESIDENT=1` means a second request for a *different* model gets a 503, and requests for the same model serialise on the engine lock. For a team tool that is correct. For a product it is a ceiling, and §6 says what to do about it.
+shilp implements neither batching nor a request queue with admission control. `SHILP_MAX_RESIDENT=1` means a request for a *different* model while one is streaming gets a 503, and requests for the same model wait on the engine lock. For a team tool that is correct. For a product it is a ceiling, and §6 says what to do about it.
 
 ### 4.4 Concurrency you must support: Little's law
 
@@ -160,18 +180,68 @@ concurrent_requests = arrival_rate × latency
 
 Ten requests per second sounds modest until you notice it means 80 simultaneous generations. If your design serialises them, the 80th user waits 80 × 8 s. This is the arithmetic behind "it worked in staging" — staging had one user.
 
-### 4.5 Prefill: the cost that is quadratic
+Little's law tells you the average load; **utilisation** tells you when it falls over. A server that handles one request at a time, taking `S` seconds each, can sustain at most `1/S` requests per second. As arrivals approach that rate, waiting does not grow gently — for random arrivals (the M/M/1 queue) the mean time in the system is `S / (1 − ρ)`, where `ρ = arrival_rate × S`. **Computed** for a 2-second answer, so a capacity of 0.5 req/s:
 
-Attention is O(n²) in sequence length, so prompt length is not free:
+| Arrival rate | Utilisation ρ | Mean time in system | of which waiting |
+|---|---|---|---|
+| 0.25 req/s | 50% | 4 s | 2 s |
+| 0.40 req/s | 80% | 10 s | 8 s |
+| 0.45 req/s | 90% | 20 s | 18 s |
+| 0.475 req/s | 95% | 40 s | 38 s |
 
-| Prompt tokens | Attention work |
+Real traffic is not exactly random, but the shape is universal: the last 20% of capacity costs more latency than the first 80%. **Plan to run a serial server below ~70% utilisation**, and treat the knee of this curve — not the throughput ceiling — as your capacity. It is also the precise argument for admission control (§6, lever 4): rejecting work above ρ ≈ 0.8 keeps the requests you do accept fast.
+
+### 4.5 Prefill: linear in practice, quadratic in the limit
+
+Prompt length is not free, but the usual "attention is O(n²)" framing overstates the cost at the lengths most apps use. Prefill does two kinds of work per prompt token:
+
+```
+prefill_FLOPs ≈ 2 × parameters × n                    (every weight touches every token: linear)
+              + ~2 × layers × attention_width × n²    (attention between tokens: quadratic)
+```
+
+where `attention_width` is query heads × head size. The quadratic term only overtakes the linear one once `n` exceeds **parameters per layer ÷ attention width** — about **12 × d_model** for a classic decoder block. **Computed**: ~49k tokens for a 7B with `d_model = 4096`; ~26k for Gemma-3-1B, whose wide MLP (6,912) and narrow attention (4 × 256) push the crossover out. Below that, time-to-first-token grows close to **linearly** with the prompt. **Measured**, Gemma-3-1B on an M3 Pro, cold cache:
+
+| Prompt tokens | CPU only | All layers on Metal |
+|---|---|---|
+| 614 | 1.93 s | 0.44 s |
+| 1,712 | 4.98 s | 0.82 s |
+| 3,107 | 9.15 s | 1.59 s |
+| *prefill rate* | *~340 tok/s* | *~2,000 tok/s above 1k tokens* |
+
+A constant rate across a 5× range of lengths is what linear looks like. The attention-only arithmetic still matters at the far end:
+
+| Prompt tokens | Attention work alone |
 |---|---|
 | 2,048 | 1× |
-| 4,096 | 4× |
 | 8,192 | 16× |
 | 32,768 | 256× |
 
-A single 32k-token document costs ~256× the attention of a 2k prompt *before* generating anything. Time-to-first-token for long prompts is a compute problem, not a bandwidth one, and it is why RAG systems that stuff 30 pages into a prompt feel slow even on good hardware. The fix is retrieval that returns less, not a bigger GPU.
+so a 32k-token document is genuinely expensive, and it is why RAG systems that stuff 30 pages into a prompt feel slow even on good hardware. The fix is retrieval that returns less, not a bigger GPU. Two practical consequences:
+
+- **Prefill is compute-bound, so this is where a GPU pays.** The 5.8× Metal speed-up above is on the same memory that only gave decode 17% (§4.2). If your users send long prompts, offloading layers is the first thing to check — shilp offloads all layers by default (`SHILP_GPU_LAYERS=-1`).
+- **A repeated prefix is almost free** — see the prefix cache in §4.6.
+
+### 4.6 Measured: one shilp process under load
+
+Everything above is arithmetic; this is what one process actually did. M3 Pro, 18 GB, Gemma-3-1B Q4_K_M, `llama-cpp-python` 0.3.36 with Metal, default settings, timed from a separate client.
+
+| Experiment | Result | What it shows |
+|---|---|---|
+| Short prompt, CPU only vs all layers on GPU | TTFT 178 ms → **27 ms**; decode 84.5 → **98.7 tok/s** | prefill is compute-bound, decode is bandwidth-bound |
+| 4 identical requests at once | first tokens at 0, 1.6, 3.2, 4.7 s; each streams at 92–99 tok/s; aggregate 96 tok/s | no batching: waiting, not slowing down (§4.3) |
+| 1,712-token prompt, then the same prefix with a new question | **823 ms → 43 ms** | the prefix cache skips re-reading what the model has already seen |
+| Two tenants, ~1,960-token system prompts each, alternating A, A, B, A, B, B | **945, 37, 910, 942, 910, 33 ms** | one cache slot: every switch of tenant is a full prefill |
+| Client disconnects 0.5 s into a 600-token answer | next request's TTFT **216 ms**; before cancellation existed it was 6.9 s — the rest of the abandoned answer (measured CPU-only, so slightly slower decode) | an abandoned answer must stop, or the queue pays for it |
+| 5,009-token prompt into a 4,096 context, `stream: true` | **HTTP 400** with the token counts (was a cut connection) | errors must surface before the first byte |
+
+The prefix-cache rows are the most useful for design, because the effect is large and free:
+
+- `llama-cpp-python` keeps the KV of the **previous request** on that model and re-uses the longest common prefix. Anything identical at the *start* of the prompt is not recomputed: ~19× faster time-to-first-token in the measurement above.
+- **Put stable content first** — system prompt, tool definitions, retrieved documents that repeat — and the user's turn last. A timestamp or request id at the top of a system prompt silently disables the cache for every request.
+- **There is one cache per model, not per user.** Two tenants with different system prompts evict each other on every switch, as the alternating row shows. That is the argument for *cache-aware routing* once you have replicas: send the same tenant (or the same system prompt) to the same replica, and each replica's cache stays warm. `llama-server`'s parallel slots and vLLM's automatic prefix caching keep many prefixes at once, which is the same idea built into the engine.
+
+To repeat any of these on your own machine, point a client at a running server and time the first content frame; `shilp usage` and the SQL in §11 give the server's own view of the same requests.
 ---
 
 ## 5. The limiting factors, ranked
@@ -182,15 +252,15 @@ In the order they actually bite, not the order they are usually listed.
 
 **2. Memory bandwidth (throughput).** Sets the decode ceiling. You cannot code your way past it; you can only move fewer bytes per token (quantise) or read them faster (better hardware).
 
-**3. Absence of batching (concurrency).** On CPU, throughput is flat as concurrency rises. This, not raw speed, is why a single-machine deployment plateaus at a handful of users.
+**3. Absence of batching (concurrency).** Without batching, throughput is flat as concurrency rises and the extra load turns into queueing (§4.3, §4.4). This, not raw speed, is why a single-process deployment plateaus at a handful of users — on a GPU just as on a CPU.
 
-**4. KV cache growth (concurrency × context).** Silent until it is not: memory climbs with the square-ish of your session count × context, and the failure is an OOM under load rather than a slow request.
+**4. KV cache growth (concurrency × context).** Silent until it is not: memory grows linearly in *both* concurrent sessions and context length — so with the product of the two — at a per-token rate set by the architecture (§4.1). The failure is an OOM under load rather than a slow request.
 
-**5. Prefill compute (TTFT with long prompts).** Quadratic in prompt length. A chat app with short prompts never notices; a document-QA app hits it immediately.
+**5. Prefill compute (TTFT with long prompts).** Close to linear in prompt length up to tens of thousands of tokens, quadratic beyond (§4.5), and compute-bound — so it is the cost a GPU removes best. A chat app with short prompts never notices; a document-QA app hits it immediately, unless the long part is a repeated prefix the cache can skip.
 
 **6. Cold start (first request).** Loading a 7B takes seconds. With mmap, llama.cpp makes *loading* nearly free, but the first forward pass still faults pages in from disk — so the first request after a restart is slow, and a rolling restart means a burst of slow requests. Warm it deliberately.
 
-**7. Single process (failure domain).** One process, one model, one crash. `uvicorn --workers 4` is not the answer: each worker loads its own copy of the weights and its own KV cache, so four workers means 4× the memory for the same throughput on CPU.
+**7. Single process (failure domain).** One process, one model, one crash. `uvicorn --workers 4` is not the answer. With mmap the read-only weights are shared through the OS page cache, so four workers do not quite cost four copies of the model — but each has its own KV cache, its own GPU buffers when layers are offloaded, and its own lock, and all four compete for the same memory bandwidth. You get 4× the KV memory for roughly the throughput of one.
 
 **8. Disk I/O.** Only at cold start, and only if the page cache is cold. A network filesystem makes this much worse — keep weights on local SSD.
 
@@ -206,17 +276,19 @@ Do these in order. Most deployments stop at step 3 and never need the rest.
 
 **1. Quantise.** Q4_K_M versus fp16 is 3.3× less memory and 3.3× more throughput, for a quality cost most tasks do not notice. Nothing else on this list is close. See [02-reshape.md](02-reshape.md).
 
+**1b. Use the accelerator you have.** Check that layers are actually on the GPU — the log line `offloaded N/N layers` or a time-to-first-token in tens of milliseconds for a short prompt. It is free, and on Apple Silicon it cut short-prompt TTFT 6.7× and long-prompt prefill 5.8× (§4.6). shilp offloads every layer by default; `SHILP_GPU_LAYERS=0` turns it off.
+
 **2. Cap context.** `num_ctx` is allocated up front and multiplied by concurrent sessions. If your app needs 4k, do not set 32k "in case". This is free and frequently saves more memory than quantisation on a busy box.
 
 **3. Right-size the model per task.** Route: a 1.5B for classification, extraction, routing and summarisation; a 7B for the hard 10%. Two models on one box costs less than one big model and is often better overall. It is also the only lever that improves *both* cost and latency.
 
-**4. Add a queue with admission control.** A bounded queue plus a 429 when full converts "everything gets slow" into "some requests are rejected quickly". Clients retry; users get an answer. Unbounded queueing is how a service dies politely.
+**4. Add a queue with admission control.** A bounded queue plus a 429 when full converts "everything gets slow" into "some requests are rejected quickly". Clients retry; users get an answer. Unbounded queueing is how a service dies politely. Size the bound from §4.4: with `S` seconds per answer and a latency budget `B`, admit at most about `B / S` waiting requests, and reject the rest with a `Retry-After`.
 
-**5. Move to GPU + vLLM for concurrency.** Continuous batching turns flat throughput into rising throughput. This is the single biggest architectural change available, and it is worth it only when you are CPU-bound *and* have concurrent demand.
+**5. Batch: `llama-server` slots first, then GPU + vLLM.** Continuous batching turns flat throughput into rising throughput. This is the single biggest architectural change available, and it is worth it only when you have concurrent demand. On the same box and the same GGUF files, `llama-server --parallel N` is the cheap first step (and the only one on Apple Silicon); on NVIDIA hardware at higher concurrency, vLLM's paged attention fits more sequences into the same memory.
 
-**6. Replicate.** Stateless replicas behind a load balancer scale linearly, at the cost of one full model copy each. Combine with 5 — replicas of a batched GPU server, not of a serial CPU one.
+**6. Replicate.** Stateless replicas behind a load balancer scale linearly, at the cost of one full model copy each. Combine with 5 — replicas of a batched server, not of a serial one. Route with the cache in mind: sending the same tenant or system prompt to the same replica keeps each replica's prefix cache warm, which round-robin destroys (§4.6).
 
-**7. Cache.** Two kinds, both underrated: a **prompt/prefix cache** (reuse the KV for a long system prompt across requests — llama.cpp keeps a prompt cache per slot) and a **response cache** for repeated identical queries. For a support bot, a response cache can absorb a large fraction of traffic.
+**7. Cache.** Two kinds, both underrated. A **prefix cache** reuses the KV of a prompt's unchanged beginning: shilp gets one per model for free from `llama-cpp-python`, measured at ~19× faster time-to-first-token on a repeated 1.7k-token prefix (§4.6) — provided the stable part of the prompt comes first. A **response cache** answers repeated identical queries without the model at all; for a support bot it can absorb a large fraction of traffic. Key it on the model, the full message list and the sampling parameters, and only cache `temperature: 0` answers.
 
 **8. Speculative decoding.** A small draft model proposes tokens, the big model verifies. 1.5–2.5× on some workloads, no quality change. Complexity for a modest, uneven win — do it last.
 
@@ -229,7 +301,7 @@ Do these in order. Most deployments stop at step 3 and never need the rest.
 | Stage | Users | Bottleneck | Symptom | Fix |
 |---|---|---|---|---|
 | Laptop demo | 1 | none | works fine | — |
-| Small team | 2–5 | serialisation | answers get slow when two people ask at once | accept it, or cap context |
+| Small team | 2–5 | serialisation | the second person waits for the first answer to finish | accept it, keep answers short, warm the prefix |
 | Internal tool | 10–30 | KV cache memory + serialisation | OOM under load; p95 in the tens of seconds | queue + admission control, smaller model |
 | Product, low volume | 100s/day | cold starts, failures | occasional 40 s request; a crash takes everything | replicas, health checks, warmup |
 | Product, real volume | 10s/min | throughput ceiling | queue grows monotonically; timeouts | GPU + batching, or hosted API |
@@ -241,15 +313,17 @@ The transition that catches people is internal tool → product. An internal too
 
 ## 8. Reliability: what actually fails
 
-**Mid-stream failure.** The model crashes or the client disconnects halfway through an SSE stream. The client has a partial answer and no way to know it is partial. Mitigation: a `finish_reason` on the final frame, and a client that treats a stream without one as an error.
+**Mid-stream failure.** The model fails or the process dies halfway through a stream. The status line already said `200`, so the client has a partial answer and only the end of the stream can tell it so. shilp ends a failed stream with an error frame (§1) and never sends `done`/`[DONE]` after one; a client that treats a stream without its terminator as an error is then correct in every case, including a killed process.
 
-**No cancellation.** If a user closes the tab, the generation continues to completion — llama.cpp exposes no cancel through the Python bindings. On a busy server this wastes a measurable fraction of your capacity. shilp has this gap; the roadmap's cooperative-flag fix is the honest mitigation.
+**Context overflow.** A prompt longer than `num_ctx` cannot be answered at all. shilp counts the rendered prompt — chat template included — before generating and returns a 400 naming both numbers, even for `stream: true`. **Measured** before that check existed: the client saw a cut connection and the logs a 500. Validate on the client too if you can: it is cheaper to trim the oldest turns of a conversation than to round-trip a rejection.
+
+**Cancellation.** If a user closes the tab, the answer should stop. shilp's worker checks a flag between tokens and closes the llama.cpp generator when the client goes away, which releases the model for the next request; the abandoned request is recorded with status **499**. **Measured**: before this, a disconnect 0.5 s into a 600-token answer made the next user wait 6.9 s for tokens nobody would read; after, 216 ms. Two limits remain. The flag is checked between tokens, so a request cancelled during a long *prefill* still finishes its prefill before stopping. And a proxy must pass the disconnect through — one that keeps the upstream connection open after the client leaves defeats cancellation entirely.
 
 **Timeouts, in three places.** Client timeout, proxy timeout, and server generation limit. If the proxy times out before the server finishes, the user sees a 504 while the GPU keeps working. Set them deliberately, in that order, longest last.
 
 **Graceful shutdown.** `SIGTERM` should stop accepting, finish in-flight streams, then exit. Otherwise every deploy truncates live answers.
 
-**Health checks that lie.** `/health` returning 200 while the model is not loaded tells the load balancer to send traffic to a replica that will fail. Report model residency in the health payload — shilp's `/health` includes `resident` for exactly this reason.
+**Health checks that lie.** `/health` returning 200 while the model is not loaded tells the load balancer to send traffic to a replica that will fail. Report model residency in the health payload — shilp's `/health` includes `resident` for exactly this reason. Note that shilp loads lazily: `resident` is empty until the first request, so a readiness check that requires it must come *after* the warmup request in §12, or a fresh replica never becomes ready.
 
 **Retry storms.** A client retrying a 20-second request every second multiplies load by 20. Retryable codes should be 429/503 only, with backoff, and the server should shed rather than queue.
 
@@ -265,7 +339,7 @@ Before it faces traffic you need, at minimum:
 - **Rate limiting and quotas** — per key, per minute. Without it, one looping client consumes the box.
 - **TLS** — terminate at a proxy (Caddy is two lines), never serve plain HTTP to the internet.
 - **Prompt-injection surface** — your server will happily execute whatever the prompt says; the risk lives in your *application*, not the inference layer, but it is worth naming since "it is just a model server" invites complacency.
-- **Multi-tenancy** — with one model and no session isolation, per-tenant data separation has to be enforced above this layer. The telemetry table stores model and token counts, not prompt text — check that stays true if you extend it.
+- **Multi-tenancy** — with one model and no session isolation, per-tenant data separation has to be enforced above this layer. The telemetry table stores model and token counts, not prompt text — check that stays true if you extend it. The prefix cache is shared too: it never returns another tenant's text, but time-to-first-token reveals whether someone *recently sent the same prefix* (§4.6 shows a ~19× difference). That timing side channel matters only if prompts are secret from other tenants; if they are, isolate tenants per replica.
 - **Secrets** — the HF token belongs in the environment, never in a manifest or a recipe.
 
 ---
@@ -306,18 +380,51 @@ The realistic pattern at scale is **mixed**: self-host the high-volume narrow ta
 
 ## 11. Observability a provider needs
 
-Four numbers decide whether your service is healthy, and all four are in shilp already:
+Four numbers decide whether your service is healthy:
 
-| Metric | Why | Where |
+| Metric | Why | Where in shilp |
 |---|---|---|
-| **TTFT** p50/p95 | the number users feel | `shilp usage`, `/metrics` |
-| **tok/s** per model | decode health; drops mean swapping or contention | same |
-| **Queue depth / saturation** | the leading indicator of everything else | not implemented — add it |
-| **Error rate by code** | 429 vs 503 vs 500 tells you *which* failure | `/metrics` counters |
+| **TTFT** p50/p95 | the number users feel; on a serial server it is queue wait + prefill | per request in SQLite — percentiles via the query below |
+| **tok/s** per model | decode health; a drop means swapping, thermal throttling or a lost GPU offload | `shilp usage`, SQLite |
+| **Saturation** | the leading indicator of everything else | average requests in flight, from SQLite (below) |
+| **Rate by status code** | 400 vs 499 vs 503 vs 500 tells you *which* failure | `shilp_requests_total{status=…}` in `/metrics`, and the `status` column |
 
-Plus two that are specific to this domain: **tokens per request** (a spike means someone is pasting documents) and **context utilisation** (how close to `num_ctx` your sessions run, which predicts OOM).
+Plus two that are specific to this domain: **tokens per request** (a spike means someone is pasting documents) and **context utilisation** (how close to `num_ctx` your sessions run, which predicts OOM and 400s).
 
-shilp records one SQLite row per request with TTFT, tok/s and token counts, and exposes Prometheus text at `/metrics`. What it does not have is a queue, so there is no queue depth to report — which is itself the honest signal that you are running a serial server.
+Two details of what shilp records, because they decide which questions you can answer:
+
+- **`/metrics` gives averages, not percentiles.** The duration metrics are Prometheus *summaries* with only `_sum` and `_count`, so a dashboard can plot the mean TTFT but not p95. Percentiles come from the per-request rows, which is what they are for.
+- **Status codes are what the client saw.** A rejected over-long prompt is a 400, a client that left mid-answer is a 499, a busy model is a 503 — not a blanket 500. The 499 rate is worth an alert of its own: users abandoning answers is how a slow server shows up before anyone complains.
+
+**Percentiles of time-to-first-token**, last hour, from `$SHILP_HOME/logs/shilp.db`:
+
+```sql
+WITH r AS (
+  SELECT ttft_ms,
+         ROW_NUMBER() OVER (ORDER BY ttft_ms) AS rn,
+         COUNT(*) OVER () AS n
+  FROM requests
+  WHERE status = 200 AND ttft_ms > 0 AND ts > strftime('%s', 'now') - 3600
+)
+SELECT n,
+       MAX(CASE WHEN rn <= 0.50 * n THEN ttft_ms END) AS p50_ms,
+       MAX(CASE WHEN rn <= 0.95 * n THEN ttft_ms END) AS p95_ms
+FROM r;
+```
+
+**Saturation and failures**, same window. `avg_in_flight` is Little's law read backwards — total time spent in the system divided by the window is the average number of requests in flight. On a server that answers one at a time, a value approaching 1 means requests have started to queue (§4.4):
+
+```sql
+SELECT COUNT(*)                                   AS requests,
+       SUM(status = 499)                          AS abandoned,
+       SUM(status BETWEEN 400 AND 498)            AS rejected,
+       SUM(status >= 500)                         AS failed,
+       ROUND(SUM(total_ms) / (3600 * 1000.0), 2)  AS avg_in_flight
+FROM requests
+WHERE ts > strftime('%s', 'now') - 3600;
+```
+
+What shilp does not have is a queue of its own — waiting happens on the engine lock — so there is no queue-depth gauge to scrape. `avg_in_flight` and p95 TTFT are the honest substitutes, and the absence is itself the signal that you are running a serial server.
 
 ---
 
@@ -337,8 +444,10 @@ Type=simple
 User=shilp
 Environment=SHILP_HOME=/var/lib/shilp
 Environment=SHILP_MAX_RESIDENT=1
+# -1 = every layer on the GPU; 0 = CPU only (ignored by a CPU-only build)
+Environment=SHILP_GPU_LAYERS=-1
 ExecStart=/opt/shilp/.venv/bin/shilp serve \
-    --model qwen2.5-1.5b-instruct-gguf:q4_k_m --host 127.0.0.1 --port 8000
+    --model google_gemma-3-1b-it-gguf:q4_k_m --host 127.0.0.1 --port 8000
 Restart=always
 RestartSec=3
 # finish in-flight streams on deploy
@@ -351,34 +460,38 @@ WantedBy=multi-user.target
 
 Bind to loopback and let a proxy handle the outside world — it keeps auth and TLS in one place instead of in your model server.
 
-**The proxy** (`Caddyfile`), which gives you TLS and a key check for free:
+**The proxy** (`Caddyfile`), which gives you TLS and a key check for free. `{$SHILP_API_KEY}` is substituted from Caddy's environment when the config loads, so the key never sits in the file:
 
 ```
 llm.example.com {
-    @authorized header Authorization "Bearer {env.SHILP_PROXY_KEY}"
+    @authorized header Authorization "Bearer {$SHILP_API_KEY}"
     handle @authorized {
         reverse_proxy 127.0.0.1:8000 {
-            flush_interval -1     # required: do not buffer the SSE stream
+            flush_interval -1     # required: do not buffer the stream
         }
     }
     respond 401
 }
 ```
 
-`flush_interval -1` is not optional. A proxy that buffers turns streaming into a 20-second wait followed by a wall of text, and the symptom looks like a model problem.
+`flush_interval -1` is not optional. A proxy that buffers turns streaming into a 20-second wait followed by a wall of text, and the symptom looks like a model problem. Caddy flushes `text/event-stream` on its own, but the Ollama surface streams `application/x-ndjson`, which it would buffer. One shared key is the minimum, not multi-tenant auth: per-key quotas and usage need a gateway or the roadmap's `SHILP_API_KEY` work.
 
 **Warm it after start**, so the first real user does not pay the page-in cost:
 
 ```bash
-curl -s localhost:8000/api/generate -d '{"model":"","prompt":"warm","stream":false,"options":{"num_predict":1}}'
+curl -s localhost:8000/api/generate -H 'content-type: application/json' \
+  -d '{"model":"","prompt":"warm","stream":false,"options":{"num_predict":1}}'
 ```
+
+The empty `model` falls back to the one named by `--model`. This is also what makes `/health` report the model as resident (§8). If your clients share a long system prompt, warm with *that* prompt: the prefix cache then starts hot as well (§4.6).
 
 **Then verify from outside**, which is the only test that counts:
 
 ```bash
 curl -N https://llm.example.com/v1/chat/completions \
-  -H "Authorization: Bearer $KEY" \
-  -d '{"model":"qwen2.5-1.5b-instruct-gguf:q4_k_m",
+  -H "Authorization: Bearer $SHILP_API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"model":"google_gemma-3-1b-it-gguf:q4_k_m",
        "messages":[{"role":"user","content":"hi"}],"stream":true}'
 ```
 
@@ -389,16 +502,21 @@ If chunks arrive progressively, the whole path works. If they arrive at once, th
 ## 13. Go-live checklist
 
 - [ ] Model chosen by task, quantised, and `num_ctx` set to what you actually need
+- [ ] KV-per-token of the chosen model checked (§4.1) — it decides concurrency per GiB
 - [ ] Memory budget includes KV × expected concurrent sessions, not just weights
-- [ ] Little's law run: `arrival_rate × latency` fits your capacity
-- [ ] Bound on concurrency, with a 429 when exceeded
+- [ ] Layers confirmed on the GPU (`offloaded N/N layers`, short-prompt TTFT in tens of ms)
+- [ ] Little's law run: `arrival_rate × latency` fits your capacity, at ≤ ~70% utilisation
+- [ ] Bound on concurrency, with a 429 and `Retry-After` when exceeded
+- [ ] Prompts laid out stable-first, so the prefix cache hits; no timestamps at the top
+- [ ] Clients treat a stream without `done`/`[DONE]` as a failure
 - [ ] Timeouts set in all three places, longest at the server
 - [ ] Streaming verified *through* the proxy, not just locally
 - [ ] Auth and rate limits in front
 - [ ] `/health` reports model residency; the LB uses it
 - [ ] Graceful shutdown drains in-flight streams
 - [ ] Warmup request after every start and deploy
-- [ ] TTFT and tok/s scraped, with an alert on p95
+- [ ] p95 TTFT computed from the request rows (not the `/metrics` average), with an alert
+- [ ] Alerts on the 499 (abandoned) and 5xx rates, and on `avg_in_flight` approaching 1
 - [ ] Cost per 1M tokens computed, and compared against the hosted alternative
 - [ ] A documented fallback for when the box dies
 
@@ -406,7 +524,7 @@ If chunks arrive progressively, the whole path works. If they arrive at once, th
 
 ## 14. Glossary
 
-**Admission control** — rejecting or queueing work at the door so the system stays inside its capacity. **Aggregate throughput** — total tokens/second across all users; distinct from per-stream speed. **Batching** — processing several sequences per weight read; the GPU throughput lever. **Cold start** — the first request after a load, which pays page-in and cache allocation. **Continuous batching** — admitting new requests at token boundaries mid-flight; vLLM's core advantage. **Concurrency** — requests in flight simultaneously. **Graceful shutdown** — stop accepting, finish in-flight, then exit. **KV cache** — per-session memory for attention state; the term that scales with users. **Little's law** — `concurrency = arrival_rate × latency`. **mmap** — mapping weights into virtual memory so only touched pages load. **p50/p95/p99** — latency percentiles; the tail is what users experience. **Prefill** — the parallel pass over the prompt; sets TTFT and scales quadratically. **Quantisation** — reducing weight precision; the largest single lever on memory and speed. **Rate limiting** — capping requests per client per unit time. **Replica** — an independent process serving the same model; scales linearly, at one model copy each. **Saturation** — the point where added load no longer adds throughput. **Speculative decoding** — a draft model proposes, the target verifies. **Time to first token (TTFT)** — prefill plus queueing; perceived responsiveness. **Warmup** — a deliberate throwaway request so the first user does not pay cold-start cost.
+**Admission control** — rejecting or queueing work at the door so the system stays inside its capacity. **Aggregate throughput** — total tokens/second across all users; distinct from per-stream speed. **Batching** — processing several sequences per weight read; the throughput lever. **Cache-aware routing** — sending requests that share a prefix to the same replica so its prefix cache stays warm. **Cold start** — the first request after a load, which pays page-in and cache allocation. **Continuous batching** — admitting new requests at token boundaries mid-flight; what `llama-server` slots and vLLM do. **Concurrency** — requests in flight simultaneously. **Graceful shutdown** — stop accepting, finish in-flight, then exit. **Grouped-query attention (GQA)** — several query heads sharing one key/value head; the reason modern models' KV cache is 4–32× smaller than older ones'. **KV cache** — per-session memory for attention state; the term that scales with users. **Little's law** — `concurrency = arrival_rate × latency`. **mmap** — mapping weights into virtual memory so only touched pages load, and processes share them. **p50/p95/p99** — latency percentiles; the tail is what users experience. **Prefill** — the parallel pass over the prompt; compute-bound, close to linear in prompt length until attention dominates. **Prefix cache** — re-using the KV of a prompt's unchanged beginning so it is not recomputed. **Quantisation** — reducing weight precision; the largest single lever on memory and speed. **Rate limiting** — capping requests per client per unit time. **Replica** — an independent process serving the same model; scales linearly, at one model copy each. **Saturation** — the point where added load no longer adds throughput. **Speculative decoding** — a draft model proposes, the target verifies. **Status 499** — the client closed the connection before the answer finished (nginx's convention); shilp records abandoned answers with it. **Time to first token (TTFT)** — queueing plus prefill; perceived responsiveness. **Utilisation (ρ)** — arrival rate × service time; waiting grows as `1 / (1 − ρ)` near 1. **Warmup** — a deliberate throwaway request so the first user does not pay cold-start cost.
 
 ---
 
@@ -414,9 +532,9 @@ If chunks arrive progressively, the whole path works. If they arrive at once, th
 
 Being precise about the boundary, since this document is about production and shilp is not yet a production server:
 
-**It has**: both API dialects, streaming, telemetry, metrics, LRU residency with refcounts, error translation, a working engine swap, and honest documentation of every trade-off.
+**It has**: both API dialects, streaming with status codes for early failures and error frames for late ones, cancellation of abandoned answers, GPU offload by default, a context-overflow check, per-request telemetry with true status codes, Prometheus metrics, LRU residency with refcounts, a working engine swap, and honest documentation of every trade-off.
 
-**It lacks**: authentication, rate limiting, a request queue, batching, cancellation, and multi-tenancy. The first two are small and on the roadmap; batching is a different engine (vLLM); cancellation is a cooperative flag.
+**It lacks**: authentication, rate limiting, a request queue with admission control, batching, and multi-tenancy. The first two are small and on the roadmap; admission control is a bounded semaphore around the engine; batching is a different engine — `llama-server` slots on the same GGUFs, or vLLM on CUDA.
 
 **What that means**: shilp is a good *team* server and a good *learning* stack — the thing you run to understand what a provider does before you rent the GPU. If you need to serve the public, put it behind a proxy that authenticates, and plan the move to a batched engine before the queue starts growing.
 
