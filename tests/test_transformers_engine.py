@@ -24,6 +24,7 @@ from shilp.engine.base import ChatMessage, GenParams  # noqa: E402
 from shilp.engine.transformers_engine import (  # noqa: E402
     TransformersEngine,
     first_stop_index,
+    require_model_dir,
     sample_next,
 )
 from shilp.store import MT_SAFETENSORS, Manifest  # noqa: E402
@@ -111,11 +112,21 @@ def test_engines_registry_lists_all_three():
 
 
 def test_a_non_model_directory_gets_a_readable_error(tmp_path: Path):
+    """The directory is checked before torch is imported, so this must hold on a
+    machine without torch — otherwise the message tells you to install a package
+    when the real problem is the path."""
     with pytest.raises(Exception) as exc:
-        TransformersEngine(_manifest(), tmp_path)
+        require_model_dir(tmp_path)
     message = str(exc.value)
     assert "not a Hugging Face model directory" in message
     assert "llamacpp" in message  # names the alternative
+
+
+def test_the_engine_checks_the_directory_before_anything_else(tmp_path: Path):
+    """Same guarantee through the constructor, which is what the loader calls."""
+    with pytest.raises(Exception) as exc:
+        TransformersEngine(_manifest(), tmp_path)
+    assert "not a Hugging Face model directory" in str(exc.value)
 
 
 def test_unknown_engine_lists_the_known_ones():
@@ -123,13 +134,21 @@ def test_unknown_engine_lists_the_known_ones():
         load_engine(_manifest(), Path("/tmp"), engine="tensorrt")
 
 
-def test_factory_builds_the_transformers_engine_for_a_real_dir(tmp_path: Path):
-    """A config.json is enough to get past the directory check; the load then
-    fails on the missing weights, which is a different error and proves the
-    routing works."""
+def test_factory_routes_to_the_transformers_engine(tmp_path: Path):
+    """A config.json gets past the directory check, so whatever fails next came
+    from the transformers engine itself — not from a llama.cpp engine being
+    handed a folder, which is the bug this guards.
+
+    Without torch the next failure is MissingDependency; with torch it is
+    EngineError from the loader. Both mean routing worked, so the assertion is
+    on the exception type rather than on the absence of a string.
+    """
     (tmp_path / "config.json").write_text('{"model_type": "gpt2"}', encoding="utf-8")
     with pytest.raises(Exception) as exc:
         load_engine(_manifest(), tmp_path, engine="transformers")
+    assert type(exc.value).__name__ in {"EngineError", "MissingDependency"}, (
+        f"routing did not reach the transformers engine: {type(exc.value).__name__}: {exc.value}"
+    )
     assert "not a Hugging Face model directory" not in str(exc.value)
 
 
