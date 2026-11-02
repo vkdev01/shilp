@@ -10,20 +10,23 @@ A roadmap is only useful if it says what is *not* there. Each item below is a re
 
 **Fix.** `shilp eval <ref> --suite gsm8k,lite --n 200`, reporting accuracy per task against the parent model, stored in the recipe. A small suite (50–200 items) that runs in minutes on a laptop would be enough to catch a bad prune or an over-aggressive quant. This is the highest-value item on the list, because it turns every other lossy operation from "trust me" into "measured".
 
-## 2. Continuous batching, or a vLLM backend
+## 2. Continuous batching: a `llama-server` engine, then vLLM
 
-**Gap.** One model, one request at a time. On a laptop that is correct. On a CUDA box it wastes most of the GPU.
+**Gap.** One model, one request at a time. **Measured** with four simultaneous requests: each streamed at full speed, but their first tokens arrived at 0, 1.6, 3.2 and 4.7 s, and aggregate throughput stayed at one stream's worth. On a laptop with one user that is correct. With several it is the ceiling ([05-deploy.md §4.3](05-deploy.md)).
 
-**Fix.** Two options, and the engine protocol was shaped for the second:
+**Fix.** Three options, in order of cost, and the engine protocol was shaped for all of them:
 
-- Implement `Engine` for vLLM, which brings continuous batching and paged attention for free. Roughly one file, plus a `gpu` extra in `pyproject.toml`.
-- Add request queueing with a micro-batch window inside the loader, which helps llama.cpp but cannot match paged attention.
+- **An engine that forwards to a local `llama-server --parallel N`.** It reads the same GGUF blobs shilp already stores, does continuous batching across slots, and runs on Metal — the only batching option on Apple Silicon. One file: start or attach to the server, translate `Chunk`s from its streaming API.
+- **An `Engine` for vLLM**, which brings paged attention and continuous batching on NVIDIA GPUs. Roughly one file, plus a `gpu` extra in `pyproject.toml`.
+- A micro-batch window inside the loader on top of `llama-cpp-python` — not recommended: the binding's high-level API is single-sequence, so this would mean reimplementing what `llama-server` already does.
 
-## 3. Cancellation
+## 3. Admission control
 
-**Gap.** A client that disconnects mid-stream leaves the worker thread finishing a generation nobody reads. One generation of wasted compute per abandoned request.
+**Gap.** There is no bound on waiting. Requests for a busy model queue on the engine lock indefinitely, so overload shows up as ever-growing time to first token rather than as a fast, retryable rejection. The utilisation table in [05-deploy.md §4.4](05-deploy.md) is the argument: past ~80% of capacity, latency grows without limit.
 
-**Fix.** llama.cpp exposes no cancellation callback through the Python bindings, so the practical approach is a cooperative flag: the pump loop checks an `asyncio.Event` between chunks and breaks. That works because chunks arrive per token; the cost is up to one token of overrun.
+**Fix.** A bounded `asyncio.Semaphore` per model in the loader (`SHILP_MAX_WAITING`, default a few requests), and a `429` with `Retry-After` when it is full — raised before the first byte, which the routes' stream priming already supports. Expose the number of waiting requests as a gauge in `/metrics`, which gives the queue-depth metric the deployment guide currently has to approximate from SQLite.
+
+**Done since this was written: cancellation.** A disconnect now stops the worker at the next token and releases the model (it used to make the next request wait 6.9 s; now 216 ms). What remains is cancelling *during prefill*: the flag is only checked between tokens, so a long prompt still finishes prefill after its client has gone. llama.cpp's abort callback is the fix when the binding exposes it.
 
 ## 4. Tool calling
 
@@ -61,11 +64,20 @@ A roadmap is only useful if it says what is *not* there. Each item below is a re
 
 **Fix.** `shilp finetune --base <ref> --data <jsonl> --method lora|grpo`, emitting an adapter that `merge-lora` consumes. This is the natural next project, and it connects to the reasoning-model work: GRPO on a small model, evaluated by the harness in item 1, served by the engine that already exists. That would make the four steps a closed loop: *pull → tune → quantize → serve → measure → tune again*.
 
-## 10. Small things
+## 10. Memory knobs for concurrency
+
+**Gap.** The levers that decide how many sessions fit in memory are not exposed: llama.cpp's KV-cache type (`q8_0` roughly halves the cache), flash attention (required for a quantised V cache), and sliding-window caches for models such as Gemma 3, whose most layers only need a 512-token window — the build measured here logs `using full-size SWA cache`.
+
+**Fix.** Manifest parameters (`PARAMETER kv_cache_type q8_0`, `PARAMETER flash_attn true`) passed through to `Llama(...)`, so they live with the model in its Shilpfile, alongside `num_ctx`. Measure each with the eval harness (item 1) before making it a default.
+
+## 11. Small things
 
 - `shilp pull --resume` reporting byte progress through a callback instead of three coarse phases.
 - A `--json` flag on every CLI command, for scripting.
 - Speculative decoding (a small draft model plus a large target), which llama.cpp supports and the loader could own.
+- Histograms instead of summaries in `/metrics`, so dashboards can show p95 time to first token without querying SQLite.
+- `load_duration` on the Ollama surface is always 0; report the loader's acquire time, as the route's docstring promises.
+- Accept Ollama requests without a `Content-Type: application/json` header, as Ollama does — `curl -d` without `-H` currently gets a 422 on `/api/*`.
 - An OpenAI-compatible `/v1/audio/*` is out of scope; that is a different kind of model.
 
 ---
@@ -73,7 +85,7 @@ A roadmap is only useful if it says what is *not* there. Each item below is a re
 ## What I would do next, in order
 
 1. **Evaluation harness.** Everything lossy becomes defensible.
-2. **Cancellation.** Cheap, removes a real waste.
-3. **vLLM backend.** Proves the engine abstraction was worth having.
+2. **Admission control.** Small, and it turns overload from "everything is slow" into "a few requests are told to retry".
+3. **A `llama-server` engine.** Real concurrency on the hardware this project targets, and proof the engine abstraction was worth having; vLLM after it for CUDA.
 4. **Fine-tuning pipeline.** Turns four steps into a loop.
 5. **Docker.** Distribution, not engineering — do it when someone else needs to run this.

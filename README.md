@@ -5,11 +5,12 @@
 `shilp` (from *shilp* — to craft, to sculpt) is a small model-serving stack in about 4,100 lines you can read in an afternoon. It is not a wrapper around `ollama serve`. It is the thing Ollama is: a content-addressed model store, an inference engine, and an HTTP API — built from scratch so that every part of the pipeline is yours.
 
 ```bash
-shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m    # 1. download
-shilp build -f Shilpfile                                 # 2. reshape (params, template, quant, surgery)
-shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m         # 3. serve
-curl localhost:8000/api/chat -d '{"model":"qwen2.5-1.5b-instruct-gguf:q4_k_m",
-  "messages":[{"role":"user","content":"hello"}]}'       # 4. use it
+shilp pull hf:bartowski/google_gemma-3-1b-it-GGUF:q4_k_m        # 1. download
+shilp build -f Shilpfile                                         # 2. reshape (params, template, quant, surgery)
+shilp serve --model google_gemma-3-1b-it-gguf:q4_k_m             # 3. serve
+curl localhost:8000/api/chat -H 'content-type: application/json' \
+  -d '{"model":"google_gemma-3-1b-it-gguf:q4_k_m",
+       "messages":[{"role":"user","content":"hello"}]}'           # 4. use it
 ```
 
 ---
@@ -52,7 +53,7 @@ git clone https://github.com/vkdev01/shilp && cd shilp
 make up
 ```
 
-`make up` is `make setup` → `make pull` → `make serve`: a venv, the dependencies, a `.env`, a doctor report, a ~800 MB model (Gemma 3 1B), and a server on `:8000`. It detects Apple Silicon and builds llama.cpp with Metal — the difference between ~50 tok/s and ~4.
+`make up` is `make setup` → `make pull` → `make serve`: a venv, the dependencies, a `.env`, a doctor report, a ~800 MB model (Gemma 3 1B), and a server on `:8000`. It detects Apple Silicon and builds llama.cpp with Metal, and the server offloads every layer to the GPU by default — on an M3 Pro that is the difference between 178 ms and 27 ms to the first token (decode speed moves far less; [docs/00-theory.md §2.4](docs/00-theory.md) explains why).
 
 `make help` lists every target. Requires Python 3.10+ and, on a Mac, Xcode command line tools (the engine compiles C++ at install time).
 
@@ -60,7 +61,7 @@ make up
 
 ```bash
 make setup    # venv, deps, .env, then report what this machine has
-make test     # 78 tests, no model, no network
+make test     # 110 tests, no model, no network (7 skip without torch)
 make pull     # Gemma-3-1B-it Q4_K_M, ~800 MB
 make serve    # http://127.0.0.1:8000 — chat UI at /chat
 ```
@@ -82,7 +83,7 @@ make demo                        # or: pip install -e ".[dev]" && SHILP_ENGINE=f
 
 ```bash
 curl -s localhost:8000/api/tags
-curl -s localhost:8000/api/chat -d '{"model":"","messages":[{"role":"user","content":"hi"}],"stream":false}'
+curl -s localhost:8000/api/chat -H 'content-type: application/json' -d '{"model":"","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
 Manual equivalent of `make setup`, if you would rather see each step:
@@ -99,14 +100,14 @@ Then:
 
 ```bash
 # Ollama surface — streaming NDJSON
-curl -N localhost:8000/api/chat -d '{
-  "model": "qwen2.5-1.5b-instruct-gguf:q4_k_m",
+curl -N localhost:8000/api/chat -H 'content-type: application/json' -d '{
+  "model": "google_gemma-3-1b-it-gguf:q4_k_m",
   "messages": [{"role": "user", "content": "Explain KV cache in two sentences."}]
 }'
 
 # OpenAI surface — SSE, so any OpenAI client works
-curl -N localhost:8000/v1/chat/completions -d '{
-  "model": "qwen2.5-1.5b-instruct-gguf:q4_k_m",
+curl -N localhost:8000/v1/chat/completions -H 'content-type: application/json' -d '{
+  "model": "google_gemma-3-1b-it-gguf:q4_k_m",
   "messages": [{"role": "user", "content": "Explain KV cache in two sentences."}],
   "stream": true
 }'
@@ -223,7 +224,7 @@ Every module opens with a doc comment saying what it is for and, where it matter
 ## Testing
 
 ```bash
-make test     # 78 unit tests, no model, no network
+make test     # 110 unit tests, no model, no network (7 skip without torch)
 make smoke    # boots a real uvicorn server and exercises every endpoint over HTTP
 make lint     # ruff, if installed
 ```
@@ -242,8 +243,8 @@ Two test fixtures are worth knowing about, because they show the design is hones
 Being clear about the edges is more useful than claiming none:
 
 - **Not multi-user.** There is no auth and no per-user quota. It binds to `127.0.0.1` by default for that reason.
-- **Not concurrent by design.** One model is resident at a time and a GGUF has one mutable KV cache, so requests serialise on the engine lock. That is the correct trade-off for a laptop and the wrong one for a server.
-- **No continuous batching.** llama.cpp's Python bindings do not expose it. A CUDA box should use vLLM, and the engine protocol is shaped so that backend can be added as one file.
+- **Not concurrent by design.** One model is resident at a time and a GGUF has one mutable KV cache, so requests take turns on the engine lock: each streams at full speed, the rest wait. That is the correct trade-off for a laptop and the wrong one for a server — [docs/05-deploy.md](docs/05-deploy.md) measures it.
+- **No continuous batching.** `llama-cpp-python`'s high-level API is single-sequence. The next step on the same GGUF files is `llama-server --parallel N` (which batches, Metal included); on a CUDA box, vLLM. The engine protocol is shaped so either can be added as one file.
 - **No tool calling.** The chat template is rendered, the tokens come back; nothing parses `tool_calls`. [Roadmap](docs/04-roadmap.md).
 - **Sharded GGUFs are rejected** with a message that says so, rather than half-supported.
 - **Surgery is lossy and unvalidated.** `prune_layers` will happily make your model worse. It reports what it did; measuring the damage is your job, and the roadmap has the eval harness that would automate it.
@@ -253,6 +254,8 @@ Being clear about the edges is more useful than claiming none:
 ## Numbers, honestly
 
 On an M2 Pro with a 1.5B Q4_K_M model, expect roughly 40–60 tok/s and ~150 ms to first token for a short prompt. A 7B Q4_K_M lands nearer 15–20 tok/s. These are ballparks — `shilp usage` reports your actual figures, which is the point of building the telemetry.
+
+**Measured** on an M3 Pro (18 GB) with the default Gemma-3-1B Q4_K_M: 98.7 tok/s decode and 27 ms to the first token with Metal; 43 ms instead of 823 ms when a 1,712-token prompt repeats its prefix; and four simultaneous requests served one after another at full speed, with the fourth waiting 4.7 s to start. [docs/05-deploy.md §4.6](docs/05-deploy.md) has the full set and what each one means for capacity.
 
 The reason a laptop can do this at all is quantization plus mmap: a 4.4 GB file is not read into RAM, it is mapped, and the OS pages in what the model touches. Resident memory ends up close to the file size rather than several times it.
 

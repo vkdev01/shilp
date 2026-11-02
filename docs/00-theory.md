@@ -143,7 +143,17 @@ tokens/second ≤ memory_bandwidth / bytes_read_per_token
 
 **Expected** real throughput is 50–70% of these ceilings — the gap is imperfect bandwidth utilisation, attention over the cache, and sampling overhead. So a 7B Q4_K_M on an M2 Pro should measure ~21–30 tok/s, and a 1.5B ~106–149.
 
-The model also predicts something counter-intuitive and useful: **on a GPU, throughput per user rises with load**, because reading the weights once can serve many sequences (continuous batching). On a single laptop stream there is nothing to batch, which is why a GPU's headline advantage is mostly a *concurrency* advantage, not a single-request one.
+**Measured**, the two regimes side by side on one machine. Gemma-3-1B Q4_K_M (0.81 GB) on an M3 Pro (150 GB/s, so a decode ceiling of ~186 tok/s), the same build run with every layer on the CPU and then on the Metal GPU:
+
+| | CPU only | Metal | Ratio |
+|---|---|---|---|
+| Decode (bandwidth-bound) | 84.5 tok/s | 98.7 tok/s | 1.17× |
+| Time to first token, short prompt | 178 ms | 27 ms | 6.7× |
+| Prefill, 3,107-token prompt | 9.15 s | 1.59 s | 5.8× |
+
+The GPU has many times the arithmetic but, on Apple Silicon, the *same* memory as the CPU. So the compute-bound phase gets 6× faster and the bandwidth-bound phase barely moves — the prefill/decode split, measured rather than asserted. Decode at 53% of the ceiling also lands where the formula said it would.
+
+The model also predicts something counter-intuitive and useful: **with continuous batching, aggregate throughput rises with load**, because reading the weights once can advance many sequences (per-user speed falls gently instead). On a single laptop stream there is nothing to batch, which is why a GPU's headline advantage is mostly a *concurrency* advantage, not a single-request one.
 
 And it predicts when it does **not** apply: if the model is small enough to sit in cache, it is not bandwidth-bound at all. **Measured** on the 2 GB test box with a 0.4 MiB model: 69 tok/s, against a formula prediction of ~178,000. The formula is right and the model is out of scope — 0.4 MiB fits in L2. *Always check the assumptions of a performance model before quoting its output.*
 
@@ -379,7 +389,7 @@ Map these against the five functions from §1 and the four walls from §3.6:
 
 ### 4.2 What it is not
 
-- **Not a scheduler.** `llama-server` handles multiple slots, but there is no paged-attention continuous batching. If you need high concurrency on a GPU, that is vLLM's job (§8).
+- **Not a high-concurrency scheduler.** `llama-server` does continuous batching across its `--parallel` slots — several sequences advanced per weight read — but each slot gets a fixed share of a preallocated KV cache, with no paged attention. That is plenty for a handful of concurrent users on one box, Apple Silicon included; for many concurrent users on NVIDIA GPUs, vLLM's paged attention fits more sequences in the same memory (§7). Note that shilp drives llama.cpp through `llama-cpp-python`'s single-sequence API, so it gets none of this batching — its requests run one at a time.
 - **Not a training framework.** It applies LoRA adapters at inference; it does not train them.
 - **Not a model store.** No tags, no manifests, no provenance. That is shilp's layer (§7).
 - **Not an API standard.** Its OpenAI-compatible endpoint is a convenience; the API surfaces in shilp exist because clients expect *specific* dialects, not because llama.cpp defines them.
@@ -395,18 +405,18 @@ shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m
 shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
 ```
 
-And underneath, the file that actually talks to the engine is `src/shilp/engine/llamacpp.py` — **146 lines**, of which the load is:
+And underneath, the file that actually talks to the engine is `src/shilp/engine/llamacpp.py` — **~230 lines**, most of them prompt counting, error handling and cancellation; the load is:
 
 ```python
 self._llm = Llama(
     model_path=str(gguf_path),   # mmap'd, quantised, already converted
     n_ctx=num_ctx,
     n_threads=threads or None,
-    n_gpu_layers=gpu_layers,
+    n_gpu_layers=gpu_layers,     # -1 by default: every layer on Metal/CUDA
 )
 ```
 
-…and the generation is a loop over the binding's chunk iterator. There is no matrix multiplication in this repository. There is no tokenizer, no sampler, no KV cache code.
+…and the generation is a loop over the binding's chunk iterator. On this path there is no matrix multiplication in the repository, and no tokenizer, sampler or KV-cache code — llama.cpp owns all of it. (The `transformers` engine is the opposite: it carries its own sampler, which is the point of having it.)
 
 ### 5.1 What changes, concretely
 
@@ -495,7 +505,7 @@ A document that only argues one side is a sales pitch. Four cases where Path B i
 
 | Situation | Use instead | Why |
 |---|---|---|
-| Many concurrent users on one GPU | **vLLM** | Paged attention + continuous batching; throughput per user rises with load. llama.cpp has no equivalent |
+| Many concurrent users on one NVIDIA GPU | **vLLM** | Paged attention + continuous batching; aggregate throughput rises with load. `llama-server` batches too, but with fixed per-slot KV it fits fewer sequences in the same memory — and shilp's Python binding does not batch at all |
 | Apple Silicon only, maximum speed | **MLX** | Tuned for unified memory; competitive with or ahead of Metal in llama.cpp |
 | Training, fine-tuning, or research on a new architecture | **transformers** | It *is* the training format; llama.cpp cannot train |
 | A brand-new architecture published last week | **transformers** | Community ports to GGUF take days; `trust_remote_code` works today |

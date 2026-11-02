@@ -58,6 +58,8 @@ This is OCI's model, and Ollama's. Copying a good idea is not a weakness; invent
 
 `Chunk.done=True` arrives exactly once, last, carrying `prompt_tokens` and `completion_tokens`. Both API surfaces depend on that contract: Ollama puts them in its final JSON object, OpenAI in a trailing chunk with empty choices.
 
+**Streaming changes when errors can be reported.** Once headers are sent the status is fixed at `200`, so the routes `prime` the stream: they await the first chunk *before* returning the response. Everything that can fail early — model resolution, loading, a 503 from the loader, a prompt longer than the context window — then reaches the ordinary exception handlers and becomes a status code. A failure after the first token ends the stream with an error frame in that surface's dialect. The cost is that headers wait for the first token, which is the moment the client is waiting for anyway.
+
 ## 6. The blocking-to-async bridge
 
 **Decision.** `server/stream.py` runs the blocking generator in a worker thread and hands chunks back through an unbounded `asyncio.Queue`.
@@ -66,7 +68,11 @@ This is OCI's model, and Ollama's. Copying a good idea is not a weakness; invent
 
 **Why the queue is unbounded.** A bounded queue has two failure modes and no upside: `put_nowait` from the worker raises `QueueFull` (dropping tokens silently) or blocks the worker while the loop is busy (deadlock-shaped). Backpressure comes from the client instead — if the HTTP peer stops reading, the socket write in the route blocks, the generator is not drained, and the worker stalls. That is the correct place for it.
 
-**Cost.** If a client disconnects mid-stream, the worker thread finishes the generation and its output is discarded. Cancellation of a running `llama.cpp` call is not exposed, so this is a known leak of one generation's worth of work, not a correctness bug. It is in the roadmap.
+**Cancellation.** A queue only carries data one way, so stopping needs a second channel: a `threading.Event`. When the consumer goes away — the client disconnected and Starlette cancelled the response — the bridge sets the flag; the worker sees it at the next chunk, stops, and closes the source generator *from its own thread*, which runs the engine's `finally`, closes the llama.cpp stream and releases the engine lock.
+
+**Why it is not optional.** This was first written as "the worker finishes the generation and the output is discarded — wasted work, not a correctness bug". Measuring it showed the cost was not the wasted tokens but the **lock**: the abandoned generation kept the model, so the next request waited for the rest of an answer nobody would read — 6.9 s in the measurement (600 tokens requested, client gone after 0.5 s), 216 ms after the fix. In a serial server, wasted work *is* latency for someone else.
+
+**Remaining cost.** The flag is checked between chunks, so a cancellation during a long prefill takes effect only when the first token arrives.
 
 ## 7. One resident model, LRU eviction, reference counts
 
@@ -76,7 +82,7 @@ This is OCI's model, and Ollama's. Copying a good idea is not a weakness; invent
 
 **Why `acquire` is a context manager.** So the release cannot be forgotten, and so `refs` is decremented even when the route raises.
 
-**Cost.** A second request for a *different* model while the first is streaming gets a 503 rather than waiting. That is honest — the alternative is a request that hangs for 30 seconds and then fails.
+**Cost.** A second request for a *different* model while the first is streaming gets a 503 rather than waiting. That is honest — the alternative is a request that hangs for 30 seconds and then fails. It is a *real* 503 even for `stream: true`, because routes await the first chunk before sending headers (§5): a streaming response that had already said `200` could only have cut the connection.
 
 ## 8. Two API surfaces, one translation point
 

@@ -7,7 +7,7 @@ One engine, two HTTP surfaces, and the numbers to tell you whether it is working
 ## Start it
 
 ```bash
-shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
+shilp serve --model google_gemma-3-1b-it-gguf:q4_k_m    # or: make serve
 # → http://127.0.0.1:8000
 ```
 
@@ -17,7 +17,7 @@ Open `http://127.0.0.1:8000/chat` for a chat client. It calls the public API and
 
 - **API surface toggle** — send through Ollama `/api/chat` (NDJSON) or OpenAI `/v1/chat/completions` (SSE); the conversation carries over when you switch.
 - **Settings** — model, system prompt, temperature, max tokens, streaming on/off. They persist in `localStorage`.
-- **Per-reply stats** — completion tokens, tok/s, time to first token, wall time; *Stop* aborts mid-stream.
+- **Per-reply stats** — completion tokens, tok/s, time to first token, wall time; *Stop* aborts mid-stream, and the server stops generating too (the request is logged as status 499).
 - **Last request** — the exact call as a copyable `curl`, plus the raw response body or stream.
 - **Theme** — light and dark, following the OS until you toggle.
 
@@ -35,6 +35,7 @@ SHILP_MAX_RESIDENT=2 shilp serve          # keep two models warm, if you have th
 | `SHILP_MAX_RESIDENT` | `1` | models kept in memory at once |
 | `SHILP_ENGINE` | `llamacpp` | `llamacpp`, `transformers` or `fake` |
 | `SHILP_THREADS` | `0` (engine decides) | llama.cpp thread count |
+| `SHILP_GPU_LAYERS` | `-1` (all) | layers offloaded to Metal/CUDA; `0` keeps everything on the CPU |
 | `SHILP_LLAMACPP_DIR` | — | llama.cpp checkout, for convert/quantize |
 | `HF_TOKEN` | — | Hub token for gated repos |
 
@@ -173,6 +174,7 @@ request → resolve model ref → merge params (manifest defaults + request)
         → loader.acquire(ref)            one resident model, LRU, refcounted
         → engine.chat(...)               blocking generator, llama.cpp
         → worker thread drains it        server/stream.py
+        → first token awaited            before any header is sent
         → route serialises to NDJSON or SSE
         → finally: telemetry row, metrics, refcount--
 ```
@@ -182,7 +184,9 @@ Four things this buys, each of which is a bug avoided:
 1. **The event loop is never blocked.** `llama.cpp` blocks the thread it runs on, so it runs on a worker. `/health` still answers while a generation is streaming.
 2. **A model is never evicted mid-stream.** `refs > 0` protects it; a second request for a different model gets a 503 rather than a truncated answer.
 3. **Loading happens once.** Two simultaneous requests for a cold model wait on one lock and share one load, rather than racing to load it twice.
-4. **Failures are recorded.** Telemetry is written in `finally`, so a 500 is a row with `status=500` — the rows you most want.
+4. **Failures are recorded — with the status the client saw.** Telemetry is written in `finally`, so a failure is a row: `400` for a prompt that does not fit, `404` for an unknown model, `503` for a busy one, `499` for a client that left, `500` for a real fault.
+5. **Errors have a status code, even when streaming.** The route waits for the first token before it sends headers, so anything that fails first — including a prompt longer than `num_ctx` — is an ordinary JSON error. A failure after that ends the stream with an error frame (`{"error": …}` on NDJSON, `data: {"error": …}` and no `[DONE]` on SSE) rather than a silently cut connection.
+6. **An abandoned answer stops.** When the client disconnects, the worker stops at the next token and closes the llama.cpp generator, which frees the model for whoever is waiting. Requests for the same model otherwise run one at a time, each at full speed — see [05-deploy.md §4.3](05-deploy.md) for what that means under load.
 
 ---
 
@@ -216,7 +220,8 @@ curl -s localhost:8000/metrics
 
 ```
 # TYPE shilp_requests_total counter
-shilp_requests_total{endpoint="/api/chat",model="qwen…:q4_k_m",surface="ollama"} 42
+shilp_requests_total{endpoint="/api/chat",model="qwen…:q4_k_m",status="200",surface="ollama"} 41
+shilp_requests_total{endpoint="/api/chat",model="qwen…:q4_k_m",status="499",surface="ollama"} 1
 # TYPE shilp_tokens_total counter
 shilp_tokens_total{direction="completion",model="qwen…:q4_k_m"} 8831
 # TYPE shilp_time_to_first_token_ms summary
@@ -226,7 +231,7 @@ shilp_time_to_first_token_ms_count{model="qwen…:q4_k_m"} 42
 shilp_models_resident 1
 ```
 
-Hand-written rather than using the Prometheus client library: four counters and two summaries do not justify a dependency, and writing the exposition format makes clear what is counted.
+Hand-written rather than using the Prometheus client library: four counters and two summaries do not justify a dependency, and writing the exposition format makes clear what is counted. A summary with only `_sum` and `_count` gives you the **mean**; for p95 time to first token, query the per-request rows in `logs/shilp.db` — [05-deploy.md §11](05-deploy.md) has the SQL.
 
 ---
 
@@ -234,11 +239,12 @@ Hand-written rather than using the Prometheus client library: four counters and 
 
 The defaults are reasonable; these are the knobs that actually matter.
 
-1. **Metal, or it is CPU-only.** `CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine]"`. Without it you will see ~4 tok/s instead of ~50 and wonder why.
+1. **Build with Metal, and let it offload.** `CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine]"` (what `make setup` does on Apple Silicon) compiles the GPU backend; `SHILP_GPU_LAYERS=-1`, the default, puts every layer on it. **Measured** on an M3 Pro with Gemma-3-1B Q4_K_M: CPU-only decodes at 84.5 tok/s and Metal at 98.7 — decode is bandwidth-bound and both share the same memory — but time to first token drops from 178 ms to 27 ms, and a 3,107-token prompt prefills in 1.6 s instead of 9.2 s. The GPU's win is prefill. Look for `offloaded N/N layers` when the model loads with verbose logging, or simply a short-prompt TTFT in tens of milliseconds.
 2. **Quantization beats everything else.** Q4_K_M on 7B is ~4.4 GB and fast; F16 is 15 GB and swaps.
 3. **`num_ctx` costs memory linearly.** The KV cache is allocated up front. 32k context on a 7B model can be several GB on its own — set it in the Shilpfile to what you actually need, not to the maximum the model supports.
 4. **Threads.** Leave `SHILP_THREADS=0` and let llama.cpp pick (it uses physical cores). Oversubscribing to logical cores is slower, not faster.
 5. **Keep the model warm.** The first request after a load pays the mmap and KV allocation. Send a one-token warmup at startup if p99 latency matters.
+6. **Put the stable part of the prompt first.** llama.cpp re-uses the KV cache for whatever prefix the new prompt shares with the previous one. **Measured**: a 1,712-token prompt took 823 ms to its first token cold and 43 ms when only the final question changed. A system prompt that starts with a timestamp, or two users with different system prompts taking turns, throws that away on every request.
 
 ### Rough expectations
 
@@ -249,6 +255,7 @@ The defaults are reasonable; these are the knobs that actually matter.
 | M1 8 GB | 7B | Q4_K_M | 8–12 |
 | x86 CPU, 8 cores | 1.5B | Q4_K_M | 8–15 |
 | x86 CPU, 8 cores | 7B | Q4_K_M | 2–4 |
+| M3 Pro 18 GB (**measured**) | Gemma-3-1B | Q4_K_M | 98.7 (Metal) / 84.5 (CPU) |
 
 Ballparks, not benchmarks. `shilp usage` reports your real numbers, which is why the telemetry exists.
 
@@ -257,7 +264,7 @@ Ballparks, not benchmarks. `shilp usage` reports your real numbers, which is why
 ## Deployment notes
 
 - **It binds to `127.0.0.1` deliberately.** There is no authentication. If you expose it, put it behind a reverse proxy that authenticates, and say so in the README of whatever you deploy.
-- **One worker, not `--workers 4`.** Each worker would load its own copy of the model and hold its own KV cache. Concurrency comes from the loader queue, not from process replication.
+- **One worker, not `--workers 4`.** The mmap'd weights would be shared through the page cache, but each worker holds its own KV cache, its own GPU buffers and its own lock, and all of them compete for the same memory bandwidth — more memory for no more throughput. Concurrency on one box comes from batching (`llama-server` slots), not from process replication; see [05-deploy.md](05-deploy.md).
 - **Docker** works but adds ~1 GB of image for the toolchain; the roadmap covers it.
 
 ## Next

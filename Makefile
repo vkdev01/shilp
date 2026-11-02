@@ -14,8 +14,9 @@ MODEL  ?= hf:bartowski/google_gemma-3-1b-it-GGUF:q4_k_m
 REF    ?= google_gemma-3-1b-it-gguf:q4_k_m
 
 # --- platform ---------------------------------------------------------
-# Metal is the difference between ~50 tok/s and ~4 tok/s on an Apple Silicon
-# machine, so it is detected rather than remembered.
+# Metal turns a 178 ms first token into 27 ms on an M3 Pro (prefill is
+# compute-bound; decode barely changes), so it is detected rather than remembered.
+# The server offloads every layer by default; SHILP_GPU_LAYERS=0 keeps it on CPU.
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S)-$(UNAME_M),Darwin-arm64)
@@ -42,7 +43,7 @@ setup: venv env ## End-to-end install: venv, dependencies, .env, doctor
 	@echo ""
 	@$(PY) -m shilp.cli doctor
 	@echo ""
-	@echo "Next:  make test     # 78 tests, no model needed"
+	@echo "Next:  make test     # 110 tests, no model needed"
 	@echo "       make pull     # ~800 MB model from the Hub"
 	@echo "       make serve    # http://127.0.0.1:8000"
 	@echo "  or:  make up       # pull + serve in one step"
