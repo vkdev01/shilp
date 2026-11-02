@@ -2,7 +2,11 @@
 
 **A separate set of design documents for the seven pieces a model server needs before other people's products can depend on it — each explained from first principles, worked through with numbers, and mapped onto this codebase step by step.**
 
-The rest of `docs/` explains how shilp works today. This set is about what it must *become*, and how. Each topic document follows the same shape:
+The rest of `docs/` explains how shilp works today. This set is about what it must *become*, and how.
+
+> **New to system design?** Start with the **[interview track](interview/README.md)**: definitions of every building block with diagrams, back-of-the-envelope estimation, the eight-step interview method, a complete mock interview designing an LLM inference API, and practice questions with flashcards. Then come back to the engineering designs below.
+
+Each topic document follows the same shape:
 
 1. **The problem** — what goes wrong without it, with numbers.
 2. **Concepts** — the ideas you need, explained from the ground up.
