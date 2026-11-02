@@ -123,6 +123,25 @@ class _IncrementalDecoder:
         return delta
 
 
+def require_model_dir(model_dir: Path) -> Path:
+    """Validate that `model_dir` looks like a Hugging Face model directory.
+
+    Called before any import, so a wrong path produces the useful message on
+    every machine — including one where torch is not installed. Checking the
+    folder first is not just tidiness: the two failures have different fixes,
+    and reporting "install torch" to someone who passed the wrong directory
+    sends them the wrong way.
+    """
+    model_dir = Path(model_dir)
+    if not (model_dir / "config.json").is_file():
+        raise EngineError(
+            f"{model_dir} is not a Hugging Face model directory. The transformers "
+            "engine needs safetensors + config, not a GGUF — pull a raw repo with "
+            "`shilp pull hf:org/model`, or serve the GGUF with --engine llamacpp."
+        )
+    return model_dir
+
+
 class TransformersEngine:
     """`Engine` backed by `transformers`. Dense weights, no GGUF."""
 
@@ -135,6 +154,10 @@ class TransformersEngine:
         dtype: str = "auto",
         device: str = "cpu",
     ):
+        # Directory first: the error for a wrong path must not depend on whether
+        # the optional dependency happens to be installed.
+        model_dir = require_model_dir(model_dir)
+
         try:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -144,14 +167,6 @@ class TransformersEngine:
                 '  pip install -e ".[base]"\n'
                 "(or use the default llama.cpp engine: --engine llamacpp)"
             ) from exc
-
-        model_dir = Path(model_dir)
-        if not (model_dir / "config.json").is_file():
-            raise EngineError(
-                f"{model_dir} is not a Hugging Face model directory. The transformers "
-                "engine needs safetensors + config, not a GGUF — pull a raw repo with "
-                "`shilp pull hf:org/model`, or serve the GGUF with --engine llamacpp."
-            )
 
         self.ref = manifest.ref
         self.manifest = manifest
