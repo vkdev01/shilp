@@ -17,13 +17,15 @@ dependencies = [
     "huggingface_hub>=0.23",
     "safetensors>=0.4",
     "numpy>=1.26",
-    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
 # The inference engine. On Apple Silicon install with:
 #   CMAKE_ARGS="-DGGML_METAL=on" pip install -e ".[engine]"
 engine = ["llama-cpp-python>=0.2.79"]
+# The bare path: plain PyTorch + transformers, no C++ and no GGUF.
+#   pip install -e ".[base]"  then  shilp serve --engine transformers
+base = ["torch>=2.1", "transformers>=4.40"]
 # Only needed for LoRA merging and HF-side surgery.
 finetune = ["torch>=2.2", "transformers>=4.40", "peft>=0.10"]
 dev = ["pytest>=8", "httpx>=0.27"]
@@ -33,9 +35,6 @@ shilp = "shilp.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-"shilp.server" = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
