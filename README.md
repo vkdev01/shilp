@@ -37,6 +37,8 @@ Three things made this worth building rather than using Ollama:
 
 Design decisions and their trade-offs are in [docs/architecture.md](docs/architecture.md). What is not built yet is in [docs/04-roadmap.md](docs/04-roadmap.md).
 
+New to any of this? Read **[docs/00-theory.md](docs/00-theory.md)** first: what inference actually computes, the parameter and KV-cache formulas with real numbers, a complete from-scratch implementation with **no llama.cpp at all** ([`scripts/bare_inference.py`](scripts/bare_inference.py), runnable), and a measured comparison of what the C++ runtime buys. That bare path also ships as an engine — `shilp serve --engine transformers`.
+
 ---
 
 ## Quickstart
