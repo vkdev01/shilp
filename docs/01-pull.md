@@ -24,6 +24,8 @@ The distinction that matters:
 
 Most popular models have both. If your only goal is to serve something today, take the GGUF.
 
+The two formats are not interchangeable and neither engine reads the other's: safetensors is the training format, GGUF is the runtime container, and a GGUF can additionally be quantised. For the full comparison — what each file contains, why a `F16` GGUF is the same size as `F16` safetensors, and which one to pick — see [00-theory.md §2.7](00-theory.md#27-what-is-actually-on-disk-safetensors-and-gguf).
+
 ---
 
 ## Commands
