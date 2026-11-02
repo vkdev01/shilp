@@ -386,6 +386,34 @@ Honesty requires the other column, and it is real:
 - **Opaque internals.** When quality is bad, you are reading C++ or guessing. With `transformers` you can `print` a tensor.
 - **Quantisation is lossy.** 4-bit is not free (§2.6): prose survives, arithmetic and long-form code degrade first. This project ships the trade-off table and, so far, no eval harness to measure the damage — the honest gap named in [04-roadmap.md](04-roadmap.md).
 
+### 5.3 Both paths ship
+
+The bare path in §3 is not a teaching sketch that gets thrown away. It is
+`src/shilp/engine/transformers_engine.py` — a second implementation of the same
+`Engine` protocol, selectable at runtime:
+
+```bash
+shilp serve --model qwen:main --engine transformers
+shilp serve --model qwen:q4_k_m                # llama.cpp, the default
+```
+
+Nothing else changes. Not the loader, not either API surface, not the telemetry,
+not the eviction policy. That is the test of whether a boundary is real: the
+diff is one file, plus a branch in the factory and a materialisation step in the
+loader that turns a manifest's blobs into a directory `transformers` can read.
+
+It also makes the trade-off measurable on your own machine rather than argued
+from this document: serve the same prompt through both engines and read
+`shilp usage`. Expect `transformers` to show roughly 3–7× the resident memory and
+3–7× lower tok/s for the same model, which is exactly what the bandwidth model in
+§2.4 predicts, since dense fp16 weights are 3–7× larger than the same weights at
+Q4_K_M.
+
+What each engine needs is not the same, and each says so when handed the wrong
+shape: llama.cpp wants one GGUF blob, `transformers` wants a safetensors
+directory. `shilp pull hf:org/model` stores the latter, `shilp pull
+hf:org/model-GGUF:q4_k_m` the former.
+
 ---
 
 ## 6. Why this project delegates instead of implementing
