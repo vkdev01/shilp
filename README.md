@@ -47,6 +47,8 @@ Putting it on a machine other people call? Four documents, in reading order:
 | [docs/07-operate.md](docs/07-operate.md) | Running it: SLOs and error budgets, load testing (`scripts/loadtest.py`), model versioning and rollout, observability and privacy, runbooks, packaging and autoscaling, quality in production |
 | [docs/08-service-roadmap.md](docs/08-service-roadmap.md) | What is implemented, partial and missing for each service capability, and the phased plan from local server to provider |
 
+**Turning it into an inference service?** **[docs/system-design/](docs/system-design/README.md)** is a separate set of system design documents: the current state of the project and its capabilities, then one detailed design each for authentication, rate limiting and quotas, request queueing and admission control, batching, replicas and load balancing, metering and billing, and multi-tenancy and abuse controls — concepts, worked numbers, the changes to this codebase step by step — and an implementation roadmap with effort, dependencies and acceptance criteria.
+
 New to any of this? Read **[docs/00-theory.md](docs/00-theory.md)** first: what inference actually computes, the parameter and KV-cache formulas with real numbers, a complete from-scratch implementation with **no llama.cpp at all** ([`scripts/bare_inference.py`](scripts/bare_inference.py), runnable), and a measured comparison of what the C++ runtime buys. That bare path also ships as an engine — `shilp serve --engine transformers`.
 
 ---

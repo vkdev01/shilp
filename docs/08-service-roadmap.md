@@ -2,7 +2,7 @@
 
 **What is implemented, what is partial, and what is missing for shilp to run as a real inference service — with the order to build it in and how to know each step is done.**
 
-This document tracks *service readiness*: everything between "a model answers on localhost" and "other people's products depend on this endpoint". The [project roadmap](04-roadmap.md) covers the rest of shilp (evaluation, tool calling, sharded GGUFs, surgery, fine-tuning). Concepts are explained in [06-service-fundamentals.md](06-service-fundamentals.md); operations in [07-operate.md](07-operate.md).
+This document tracks *service readiness*: everything between "a model answers on localhost" and "other people's products depend on this endpoint". The [project roadmap](04-roadmap.md) covers the rest of shilp (evaluation, tool calling, sharded GGUFs, surgery, fine-tuning). Concepts are explained in [06-service-fundamentals.md](06-service-fundamentals.md); operations in [07-operate.md](07-operate.md). The detailed designs behind the Phase 1–4 items — authentication, rate limiting, admission control, batching, replicas, metering and tenancy, each mapped onto this codebase — are in the **[system design set](system-design/README.md)**, which uses the same item ids.
 
 | Mark | Meaning |
 |---|---|
@@ -101,7 +101,7 @@ Each level depends on the one before it. In particular, **nothing above L0 is sa
 | Pin an upstream revision | 🟡 | honoured for safetensors repos; **ignored for GGUF pulls** | P1.8 |
 | Load testing with an SLO gate | ✅ | `scripts/loadtest.py`, `make loadtest` | — |
 | Smoke test over real HTTP | ✅ | `scripts/smoke_test.py` | — |
-| Health / readiness | 🟡 | `/health` with resident models; ready only after a warmup request | P3.5: probe guidance in manifests |
+| Health / readiness | 🟡 | `/health` is unconditional liveness and lists resident models; there is no readiness signal, and models load lazily on the first request | P3.5: `--preload`, `/ready` |
 | Graceful shutdown | 🟡 | uvicorn's default on `SIGTERM` | P3.5: drain timeout |
 | Containers and orchestration | ⬜ | — | P3.5 |
 | Evaluation gate for model changes | ⬜ | — | P4.4 (project roadmap item 1) |
@@ -132,9 +132,9 @@ Goal: shilp can sit behind a proxy and be used by a trusted team without anyone 
 *Done when:* every inference route returns 401 without the key (tested); starting with `--host 0.0.0.0` and no key fails with a clear message.
 
 **P1.2 Admin separation.** `/api/pull` and `/api/delete` disabled over HTTP unless `SHILP_ENABLE_ADMIN=1`, and then only with an admin key. The CLI is unaffected.
-*Done when:* both return 403 by default (tested); the deploy doc's proxy allowlist becomes defence in depth rather than the only defence.
+*Done when:* both return **404** by default — the routes are not registered at all — and **403** when admin is enabled but the key lacks the admin scope (tested); the deploy doc's proxy allowlist becomes defence in depth rather than the only defence.
 
-**P1.3 Request limits.** `SHILP_MAX_BODY_BYTES`, a maximum message count, `SHILP_MAX_OUTPUT_TOKENS` (a ceiling on `max_tokens` / `num_predict`), and `SHILP_REQUEST_TIMEOUT` (a deadline that cancels the generation through the existing stop flag).
+**P1.3 Request limits.** `SHILP_MAX_BODY_BYTES`, a maximum message count, `SHILP_MAX_OUTPUT_TOKENS` (a ceiling on `max_tokens` / `num_predict`), and `SHILP_REQUEST_TIMEOUT` (a deadline that cancels the generation through the existing stop flag — between tokens, so it cannot cut a prefill short; the prompt cap bounds that).
 *Done when:* each limit returns a 400 or 413 naming the limit, or ends the stream with `finish_reason: "length"` / a timeout error frame (tested).
 
 **P1.4 Admission control.** An explicit, FIFO, *cancellable* wait queue per model in the loader — replacing the wait on the engine's thread lock, so a client that leaves while queued is removed at once instead of later paying for its prefill — with a bound on waiting requests (`SHILP_MAX_WAITING`); beyond it, `429` with `Retry-After` ≈ waiting × recent mean service time. A `shilp_requests_waiting` gauge in `/metrics`. Because routes already await the first chunk before sending headers, the 429 works for streaming requests too.

@@ -31,7 +31,7 @@ SHILP_MAX_RESIDENT=2 shilp serve          # keep two models warm, if you have th
 | Env var | Default | Meaning |
 |---|---|---|
 | `SHILP_HOME` | `~/.shilp` | store, manifests, telemetry |
-| `SHILP_HOST` / `SHILP_PORT` | `127.0.0.1` / `8000` | bind address |
+| `SHILP_HOST` / `SHILP_PORT` | `127.0.0.1` / `8000` | bind address — currently honoured only through `shilp serve --host / --port`; the variables are read into settings but not used by `serve` |
 | `SHILP_MAX_RESIDENT` | `1` | models kept in memory at once |
 | `SHILP_ENGINE` | `llamacpp` | `llamacpp`, `transformers` or `fake` |
 | `SHILP_THREADS` | `0` (engine decides) | llama.cpp thread count |

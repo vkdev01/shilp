@@ -2,7 +2,7 @@
 
 **The parts of a model-serving system, explained from first principles: what each one is, how it works, what is different about it for LLMs, and where shilp stands today.**
 
-[00-theory.md](00-theory.md) explains what one forward pass computes. [05-deploy.md](05-deploy.md) does the capacity arithmetic. This document sits between them: it names the *components* a real inference service is built from, so that the deployment guide's advice and the [service roadmap](08-service-roadmap.md) have a shared vocabulary.
+[00-theory.md](00-theory.md) explains what one forward pass computes. [05-deploy.md](05-deploy.md) does the capacity arithmetic. This document sits between them: it names the *components* a real inference service is built from, so that the deployment guide's advice and the [service roadmap](08-service-roadmap.md) have a shared vocabulary. For the full design of each component in shilp — step by step, with numbers and code sketches — see the [system design set](system-design/README.md).
 
 Every section ends with **In shilp today**, using the same legend as the roadmap:
 
