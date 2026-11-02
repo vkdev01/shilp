@@ -2,6 +2,8 @@
 
 A roadmap is only useful if it says what is *not* there. Each item below is a real gap in the current code, with the reason it was left and the shape the fix would take.
 
+This is the *project* roadmap. Everything needed to run shilp as an inference service — authentication, limits, admission control, rate limiting, metering, batching engines, replicas, containers — is tracked item by item, with status and acceptance criteria, in the **[service roadmap](08-service-roadmap.md)**. Items 2, 3 and 7 below are summarised there in more detail.
+
 ---
 
 ## 1. A real evaluation harness

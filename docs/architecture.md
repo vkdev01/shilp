@@ -72,7 +72,7 @@ This is OCI's model, and Ollama's. Copying a good idea is not a weakness; invent
 
 **Why it is not optional.** This was first written as "the worker finishes the generation and the output is discarded — wasted work, not a correctness bug". Measuring it showed the cost was not the wasted tokens but the **lock**: the abandoned generation kept the model, so the next request waited for the rest of an answer nobody would read — 6.9 s in the measurement (600 tokens requested, client gone after 0.5 s), 216 ms after the fix. In a serial server, wasted work *is* latency for someone else.
 
-**Remaining cost.** The flag is checked between chunks, so a cancellation during a long prefill takes effect only when the first token arrives.
+**Remaining cost.** The flag is checked between chunks, so a cancellation during a long prefill takes effect only when the first token arrives — and a request whose client leaves while it is still waiting for the engine lock keeps its place, then runs its prefill before noticing. Replacing the lock wait with a cancellable async queue is roadmap P1.4 ([08-service-roadmap.md](08-service-roadmap.md)).
 
 ## 7. One resident model, LRU eviction, reference counts
 

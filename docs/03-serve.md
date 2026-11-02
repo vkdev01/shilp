@@ -184,9 +184,62 @@ Four things this buys, each of which is a bug avoided:
 1. **The event loop is never blocked.** `llama.cpp` blocks the thread it runs on, so it runs on a worker. `/health` still answers while a generation is streaming.
 2. **A model is never evicted mid-stream.** `refs > 0` protects it; a second request for a different model gets a 503 rather than a truncated answer.
 3. **Loading happens once.** Two simultaneous requests for a cold model wait on one lock and share one load, rather than racing to load it twice.
-4. **Failures are recorded — with the status the client saw.** Telemetry is written in `finally`, so a failure is a row: `400` for a prompt that does not fit, `404` for an unknown model, `503` for a busy one, `499` for a client that left, `500` for a real fault.
+4. **Failures are recorded — with the status the client saw.** Telemetry is written in `finally`, so a failure during generation is a row: `400` for a prompt that does not fit, `503` for a busy model, `499` for a client that left, `500` for a real fault. Requests rejected *before* generation — an unknown model (404) or a body that fails validation (422) — are not recorded yet; the access log has them.
 5. **Errors have a status code, even when streaming.** The route waits for the first token before it sends headers, so anything that fails first — including a prompt longer than `num_ctx` — is an ordinary JSON error. A failure after that ends the stream with an error frame (`{"error": …}` on NDJSON, `data: {"error": …}` and no `[DONE]` on SSE) rather than a silently cut connection.
 6. **An abandoned answer stops.** When the client disconnects, the worker stops at the next token and closes the llama.cpp generator, which frees the model for whoever is waiting. Requests for the same model otherwise run one at a time, each at full speed — see [05-deploy.md §4.3](05-deploy.md) for what that means under load.
+
+---
+
+## The API contract — and hardening it for real clients
+
+A client integrates with a contract, not with your code: what it may send, what it gets back, and what each failure looks like. This table is the contract as it stands, with what a public endpoint needs on top. Legend as in the [service roadmap](08-service-roadmap.md): ✅ in place, 🟡 partial, ⬜ missing.
+
+### What a client may send
+
+| Aspect | Today | Needed before exposure |
+|---|---|---|
+| Content type | ✅ JSON bodies; anything else is a 422 | ⬜ accept Ollama requests without `Content-Type`, as Ollama does |
+| Body size | ⬜ unlimited | a cap at the proxy (Caddy `request_body { max_size 1MB }`, nginx `client_max_body_size 1m`) and in the app |
+| Prompt length | ✅ counted after the chat template; over `num_ctx` → 400 naming both numbers, even when streaming | — |
+| Number of messages | ⬜ unlimited | a cap, so a client cannot send 10,000 empty turns |
+| Output length | 🟡 `num_predict` defaults to 512, but `max_tokens` / `options.num_predict` from the client override it up to the context | ⬜ a server-side ceiling per model or per key |
+| Generation time | ⬜ no deadline; generation ends at a stop token or the length limit | ⬜ a per-request deadline that cancels the generation |
+| Sampling | ✅ temperature, top-p, top-k, min-p, repeat penalty, stop sequences, `seed` | — |
+| Determinism | 🟡 `seed` plus `temperature: 0` repeats on the same build and hardware; not across builds | document it; do not promise bit-exact output |
+| Structured output (JSON mode, schemas) | ⬜ | llama.cpp supports grammar-constrained decoding; expose `response_format` / `format` |
+| Tool calls, `n > 1`, `logprobs` | ⬜ | see the [project roadmap](04-roadmap.md) |
+
+### What it gets back
+
+| Aspect | Today |
+|---|---|
+| Streaming framing | ✅ NDJSON (Ollama) and SSE with `[DONE]` (OpenAI) |
+| Token usage | ✅ on the final frame and in non-streaming bodies; prompt tokens include the chat template |
+| Finish reason | 🟡 always `stop`, even when the answer was cut off by the length limit — truncation is invisible until this is fixed |
+| Request id | ⬜ OpenAI responses carry a generated `id`, but there is no `X-Request-ID` header and the id is not logged |
+| Rate-limit headers | ⬜ there is no rate limiting yet ([06-service-fundamentals.md §5](06-service-fundamentals.md)) |
+| CORS | ⬜ no CORS headers: the built-in `/chat` page works (same origin), a browser app on another origin cannot call the API. When added, use an explicit origin allowlist, never `*` on an authenticated API |
+
+### Status codes and error bodies
+
+| Status | Meaning in shilp | Retry? |
+|---|---|---|
+| 400 | invalid request, or the prompt does not fit the context window | no — fix the request |
+| 404 | unknown model | no |
+| 422 | body failed schema validation (or was not JSON); FastAPI's `{"detail": [...]}` body | no |
+| 429 | *(not emitted yet — reserved for rate limits and a full queue)* | yes, after `Retry-After` |
+| 499 | *(recorded in telemetry, never sent)* the client disconnected mid-answer | — |
+| 500 | engine failure | maybe, once |
+| 502 | the Hugging Face Hub failed during `/api/pull` | yes, with backoff |
+| 503 | the model is busy and another one is resident (`SHILP_MAX_RESIDENT`) | yes, with backoff |
+
+Error bodies today are `{"error": "<message>", "type": "<kind>"}` on both surfaces (except 422s, above). That is Ollama's shape. OpenAI's is nested — `{"error": {"message": …, "type": …, "code": …}}` — so OpenAI SDKs still raise the right exception class (they branch on the status code) but may not show the message cleanly. 🟡 Matching each surface's shape is a small Phase 1 item. Errors *inside* a stream already use each dialect's own shape.
+
+Once a stream has started, its status is fixed at 200, so a failure is reported as a final error frame and the stream ends without `done` / `[DONE]` — clients should treat that as a failed request ([architecture.md §5](architecture.md)).
+
+### Admin endpoints are part of the attack surface
+
+`/api/pull` downloads arbitrary models and `/api/delete` removes them. They exist for Ollama compatibility and are **not authenticated**. Until admin separation lands ([08-service-roadmap.md](08-service-roadmap.md), Phase 1), expose only the inference paths through your proxy — `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/v1/embeddings`, `/api/chat`, `/api/generate`, `/api/embed`, `/api/tags` — and keep everything else on loopback.
 
 ---
 
@@ -269,6 +322,10 @@ Ballparks, not benchmarks. `shilp usage` reports your real numbers, which is why
 
 ## Next
 
+[Service fundamentals](06-service-fundamentals.md) — the components of an inference service, and which ones shilp has.
+
 [Deployment and scaling](05-deploy.md) — what changes when other people call this, and what limits it.
 
-[Roadmap](04-roadmap.md) — what is deliberately missing and what to build next.
+[Operating it](07-operate.md) — SLOs, load testing, rollout, observability, runbooks.
+
+[Service roadmap](08-service-roadmap.md) — implemented vs planned, phase by phase. [Project roadmap](04-roadmap.md) — everything else.

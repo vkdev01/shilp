@@ -38,7 +38,14 @@ Three things made this worth building rather than using Ollama:
 
 Design decisions and their trade-offs are in [docs/architecture.md](docs/architecture.md). What is not built yet is in [docs/04-roadmap.md](docs/04-roadmap.md).
 
-Putting it on a machine other people call? **[docs/05-deploy.md](docs/05-deploy.md)** covers the provider contract, capacity planning with real arithmetic (memory, throughput, concurrency, Little's law), what breaks between 1 and 1000 users, and self-host vs hosted cost.
+Putting it on a machine other people call? Four documents, in reading order:
+
+| Doc | Covers |
+|---|---|
+| [docs/06-service-fundamentals.md](docs/06-service-fundamentals.md) | The building blocks of an inference service from first principles — KV cache, concurrency vs batching, request queues, rate limiting, replicas and load balancing, authentication, multi-tenancy and abuse controls, metering and billing — each with what shilp has today |
+| [docs/05-deploy.md](docs/05-deploy.md) | Capacity planning with real arithmetic and measurements: memory, throughput, queueing, prefill, prefix caching, a worked sizing example, hardware sizing, reliability, security, cost, a reference deployment |
+| [docs/07-operate.md](docs/07-operate.md) | Running it: SLOs and error budgets, load testing (`scripts/loadtest.py`), model versioning and rollout, observability and privacy, runbooks, packaging and autoscaling, quality in production |
+| [docs/08-service-roadmap.md](docs/08-service-roadmap.md) | What is implemented, partial and missing for each service capability, and the phased plan from local server to provider |
 
 New to any of this? Read **[docs/00-theory.md](docs/00-theory.md)** first: what inference actually computes, the parameter and KV-cache formulas with real numbers, a complete from-scratch implementation with **no llama.cpp at all** ([`scripts/bare_inference.py`](scripts/bare_inference.py), runnable), and a measured comparison of what the C++ runtime buys. That bare path also ships as an engine — `shilp serve --engine transformers`.
 
@@ -61,7 +68,7 @@ make up
 
 ```bash
 make setup    # venv, deps, .env, then report what this machine has
-make test     # 110 tests, no model, no network (7 skip without torch)
+make test     # 124 tests, no model, no network (7 skip without torch)
 make pull     # Gemma-3-1B-it Q4_K_M, ~800 MB
 make serve    # http://127.0.0.1:8000 — chat UI at /chat
 ```
@@ -224,7 +231,7 @@ Every module opens with a doc comment saying what it is for and, where it matter
 ## Testing
 
 ```bash
-make test     # 110 unit tests, no model, no network (7 skip without torch)
+make test     # 124 unit tests, no model, no network (7 skip without torch)
 make smoke    # boots a real uvicorn server and exercises every endpoint over HTTP
 make lint     # ruff, if installed
 ```
