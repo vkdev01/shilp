@@ -8,12 +8,16 @@ test suite people stop running.
 
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 
 import pytest
 
-torch = pytest.importorskip("torch", reason="the transformers engine needs torch")
+needs_torch = pytest.mark.skipif(
+    importlib.util.find_spec("torch") is None,
+    reason="the sampler is pure torch",
+)
 
 from shilp.engine import ENGINES, load_engine  # noqa: E402
 from shilp.engine.base import ChatMessage, GenParams  # noqa: E402
@@ -31,45 +35,55 @@ def _manifest(ref: str = "tiny:base") -> Manifest:
 
 
 # --- the sampler -------------------------------------------------------
+@needs_torch
 def test_temperature_zero_is_greedy():
+    import torch
     logits = torch.tensor([0.1, 5.0, 0.2, 0.3])
     assert sample_next(logits, GenParams(temperature=0.0)) == 1
 
 
+@needs_torch
 def test_top_k_of_one_is_also_greedy():
+    import torch
     logits = torch.tensor([0.1, 5.0, 4.9, 0.3])
     for _ in range(20):
         assert sample_next(logits, GenParams(temperature=1.0, top_k=1)) == 1
 
 
+@needs_torch
 def test_top_p_keeps_only_the_nucleus():
+    import torch
     """With top_p small enough to cover one token, sampling is deterministic."""
     logits = torch.tensor([10.0, 0.0, 0.0, 0.0])
     for _ in range(20):
         assert sample_next(logits, GenParams(temperature=1.0, top_p=0.5)) == 0
 
 
+@needs_torch
 def test_min_p_filters_the_tail():
+    import torch
     logits = torch.tensor([10.0, 0.0, 0.0, 0.0])
     for _ in range(20):
         assert sample_next(logits, GenParams(temperature=1.0, min_p=0.5)) == 0
 
 
+@needs_torch
 def test_sampling_actually_varies_at_high_temperature():
+    import torch
     """A flat distribution must not collapse to one id, or sampling is broken."""
     logits = torch.zeros(50)
     seen = {sample_next(logits, GenParams(temperature=2.0)) for _ in range(200)}
     assert len(seen) > 1
 
 
+@needs_torch
 def test_seed_makes_sampling_reproducible():
+    import torch
     logits = torch.tensor([1.0, 1.0, 1.0, 1.0])
     params = GenParams(temperature=1.0, seed=7)
-    a = [sample_next(logits, params, generator=torch.Generator().manual_seed(7))
-         for _ in range(1)]
-    b = [sample_next(logits, params, generator=torch.Generator().manual_seed(7))
-         for _ in range(1)]
-    assert a == b
+    first = sample_next(logits, params, generator=torch.Generator().manual_seed(7))
+    second = sample_next(logits, params, generator=torch.Generator().manual_seed(7))
+    assert first == second
 
 
 # --- stop sequences ----------------------------------------------------
@@ -139,6 +153,7 @@ def test_pull_keeps_safetensors_weights(store):
 
 
 # --- opt-in: a real model, if you want one -----------------------------
+@needs_torch
 @pytest.mark.skipif(
     not os.environ.get("SHILP_TEST_MODEL"),
     reason="set SHILP_TEST_MODEL=<hf repo> to run the end-to-end engine test",
