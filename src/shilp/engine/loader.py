@@ -12,6 +12,7 @@ for the same cold model trigger one load, not two.
 from __future__ import annotations
 
 import asyncio
+import shutil
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -93,18 +94,45 @@ class ModelLoader:
 
     # --- loading -------------------------------------------------------
     def _build(self, manifest: Manifest) -> LoadedModel:
-        """Blocking part: find the weights, construct the engine."""
-        if manifest.engine == "fake" or self.settings.engine == "fake":
-            engine: Engine = FakeEngine(manifest)
-        else:
-            layer = manifest.layer_of(MT_GGUF)
-            if layer is None:
-                raise ModelNotReady(
-                    f"{manifest.ref} has no GGUF weights. Convert and quantize first, "
-                    "or pull a GGUF repo: shilp pull hf:org/model-GGUF:q4_k_m"
-                )
-            engine = self._factory(manifest, self.store.blob_path(layer.digest))
+        """Blocking part: find the weights in the shape this engine needs.
+
+        The two engines want different things on disk — llama.cpp a single GGUF
+        blob, transformers a directory of safetensors — so the loader resolves
+        that and the engines never touch the store.
+        """
+        name = manifest.engine or self.settings.engine
+        if name == "fake":
+            return LoadedModel(manifest=manifest, engine=FakeEngine(manifest))
+
+        if name == "transformers":
+            engine: Engine = self._factory(manifest, self._model_dir(manifest))
+            return LoadedModel(manifest=manifest, engine=engine)
+
+        layer = manifest.layer_of(MT_GGUF)
+        if layer is None:
+            raise ModelNotReady(
+                f"{manifest.ref} has no GGUF weights. Convert and quantize first, "
+                "or pull a GGUF repo: shilp pull hf:org/model-GGUF:q4_k_m"
+            )
+        engine = self._factory(manifest, self.store.blob_path(layer.digest))
         return LoadedModel(manifest=manifest, engine=engine)
+
+    def _model_dir(self, manifest: Manifest) -> Path:
+        """Materialise a manifest's layers into a directory `transformers` can read.
+
+        Cached under $SHILP_HOME/cache so a second load is a no-op; a manifest
+        whose layers change gets a new directory name, so the cache cannot go
+        stale in place.
+        """
+        from ..export import materialise
+
+        digest = "-".join(layer.digest.split(":")[1][:8] for layer in manifest.layers[:1])
+        dest = self.store.home / "cache" / f"{manifest.name}-{manifest.tag}-{digest}"
+        if not (dest / "config.json").is_file():
+            if dest.exists():
+                shutil.rmtree(dest)
+            materialise(self.store, manifest, dest)
+        return dest
 
     async def _evict_one(self) -> bool:
         """Close the least recently used idle model. False if none is idle."""
