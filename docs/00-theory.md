@@ -181,6 +181,56 @@ resident_bytes ≈ weight_bytes + KV_cache_bytes + runtime_overhead
 
 The `runtime` term is not a rounding error, and §3.6 measures it: a Python + PyTorch process carrying a 0.4 MiB model still occupied **707 MiB** of RSS. Framework overhead is frequently larger than the model for anything under ~1B parameters. Quantisation shrinks the first term; a leaner runtime shrinks the third; only careful `num_ctx` shrinks the second.
 
+### 2.7 What is actually on disk: safetensors and GGUF
+
+Both formats hold the same numbers — the weights. They are **containers**, not different models, and the two engines in this repository each read exactly one of them. Understanding the split explains most of the confusion around "why is my model 14 GB here and 4 GB there".
+
+| | safetensors | GGUF |
+|---|---|---|
+| What it is | a bare tensor container | a runtime container for GGML / llama.cpp |
+| Header | 8-byte length, then JSON: per-tensor dtype, shape, byte offsets | magic `GGUF`, version, metadata KV block, tensor-info table |
+| What is inside | tensors only | tensors **plus** architecture, context length, RoPE settings, tokenizer vocab and merges, chat template, quantisation type |
+| Files per model | a directory: `config.json`, `tokenizer.json`, `tokenizer_config.json`, `generation_config.json`, plus sharded weight files | one file |
+| Precision | whatever the model was trained in: fp32, fp16, bf16 | fp32 / fp16 **and** a type system for quantised blocks (`Q4_K`, `Q6_K`, `Q8_0`, i-quants) |
+| Memory-mapped | designed for lazy loading; PyTorch can mmap it | the normal path — only touched pages are read |
+| Read by | PyTorch, `transformers`, MLX, training code | llama.cpp and everything built on it: Ollama, LM Studio, shilp |
+| Origin | Hugging Face, 2022, to replace pickle checkpoints | llama.cpp, 2023, successor to the older GGML format |
+
+#### Format is not precision
+
+This is the conflation worth killing: **GGUF is not a compression format.** It is a container that *can* hold quantised weights. A `F16` GGUF is essentially the same size as the same model in `F16` safetensors — converting is a format change and lossless. The size difference everyone quotes comes from quantisation, which happens *after* conversion:
+
+```
+safetensors fp16   →  convert_hf_to_gguf  →  GGUF f16  →  llama-quantize  →  GGUF Q4_K_M
+   2.88 GiB             (lossless)              2.88 GiB     (lossy)            0.88 GiB
+```
+
+Qwen2.5-1.5B, from its config: 2.88 GiB at fp16 **either way**, 0.88 GiB at Q4_K_M. The 3.3× is quantisation's doing, not the container's.
+
+The second half of the difference is **self-description**. A safetensors file is weights and nothing else: it does not know it is a Qwen, does not know its context length, carries no tokenizer and no chat template. Those live in sibling JSON files — which is why a Hugging Face repo is a directory and a GGUF is a single download. GGUF carries the manual printed on the casing, which is exactly why `shilp pull` can register a model from one file.
+
+#### What each engine needs
+
+Neither engine reads the other's format, which is the whole reason the loader has two branches:
+
+```bash
+shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct               # → safetensors directory
+shilp serve --engine transformers                       # PyTorch reads that
+
+shilp pull hf:Qwen/Qwen2.5-1.5B-Instruct-GGUF:q4_k_m   # → one GGUF file
+shilp serve                                             # llama.cpp reads that
+```
+
+`transformers` has no GGUF loader; llama.cpp has no safetensors loader. So `engine/loader.py` materialises a *directory* for one backend and hands the other a single blob path. Hand either engine the wrong shape and it names the fix rather than failing obscurely.
+
+#### Which to use
+
+**safetensors** when you intend to *change* the model — fine-tuning, merging a LoRA, pruning layers, editing the tokenizer. It is the training format, the whole ML ecosystem reads it, and any tensor is one `print` away. See [02-reshape.md](02-reshape.md).
+
+**GGUF** when you intend to *run* it — quantised, one file, no Python in the hot path, mmap'd, portable across CPU, Metal, CUDA and Vulkan. This is what a laptop actually needs, and it is why llama.cpp is the default engine.
+
+Conversion is one-way in practice. HF → GGUF at the same precision is lossless; GGUF → safetensors on a quantised file returns *approximations* of the original floats, not the originals. Convert once, late, after every change you wanted to make.
+
 ---
 
 ## 3. Path A — the bare minimum, in Python
