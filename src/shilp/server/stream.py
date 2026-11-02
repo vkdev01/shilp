@@ -8,6 +8,13 @@ The queue is unbounded: a bounded one would either block the worker (deadlock
 risk while the loop is busy) or drop tokens (silent corruption). Backpressure
 comes from the HTTP client instead — if it stops reading, TCP stalls and the
 socket write in the route blocks.
+
+Cancellation runs the other way. When the consumer goes away — the client
+disconnected, so Starlette cancelled the response — a flag tells the worker to
+stop at the next chunk and close the source generator *from its own thread*.
+Closing it runs the engine's `finally`, which stops llama.cpp and releases the
+engine lock. Without this, an abandoned answer kept generating to the end and
+every request queued behind it waited for tokens nobody would read.
 """
 
 from __future__ import annotations
@@ -25,22 +32,40 @@ async def to_async(source: Iterator[Chunk]) -> AsyncIterator[Chunk]:
     """Yield the chunks of a blocking iterator without blocking the loop."""
     loop = asyncio.get_running_loop()
     queue: asyncio.Queue = asyncio.Queue()
+    stop = threading.Event()
+
+    def deliver(item: object) -> None:
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, item)
+        except RuntimeError:
+            pass  # the loop is gone; nobody is listening
 
     def pump() -> None:
         try:
             for chunk in source:
-                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+                if stop.is_set():
+                    break
+                deliver(chunk)
         except BaseException as exc:  # forwarded and re-raised in the caller
-            loop.call_soon_threadsafe(queue.put_nowait, exc)
+            deliver(exc)
         finally:
-            loop.call_soon_threadsafe(queue.put_nowait, _SENTINEL)
+            close = getattr(source, "close", None)
+            if close is not None:
+                close()
+            deliver(_SENTINEL)
 
-    threading.Thread(target=pump, name="shilp-engine", daemon=True).start()
+    worker = threading.Thread(target=pump, name="shilp-engine", daemon=True)
+    worker.start()
 
-    while True:
-        item = await queue.get()
-        if item is _SENTINEL:
-            return
-        if isinstance(item, BaseException):
-            raise item
-        yield item
+    try:
+        while True:
+            item = await queue.get()
+            if item is _SENTINEL:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item
+    finally:
+        # Normal completion, an error, or cancellation: in every case the worker
+        # must not keep generating on our behalf.
+        stop.set()

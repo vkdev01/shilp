@@ -4,9 +4,10 @@ Enough of Ollama's API that existing clients — `ollama` CLIs, Continue, Open W
 LangChain's `Ollama` class — talk to shilp without knowing it is not Ollama.
 
 Faithful where it matters: NDJSON streaming, `done: true` as the last line,
-durations in nanoseconds, `model` as `name:tag`. Approximated where the real
-thing has no equivalent: `load_duration` is the acquire time, and `digest` is
-the manifest's own hash rather than an Ollama blob id.
+durations in nanoseconds, `model` as `name:tag`, and `{"error": …}` as the last
+line when a stream fails midway. Approximated where the real thing has no
+equivalent: `digest` is the manifest's own hash rather than an Ollama blob id,
+and `load_duration` is not measured yet (always 0; see the roadmap).
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from ..engine.base import ChatMessage
 from ..hub import HfSpec, pull as hub_pull
 from ..store import Manifest
 from ..utils import human_size, sha256_bytes
-from .generate import build_params, collect, embed, stream_chat, stream_generate
+from .generate import build_params, collect, embed, prime, stream_chat, stream_generate
 from .schemas import (
     OllamaChatRequest,
     OllamaChatResponse,
@@ -204,31 +205,37 @@ async def chat(body: OllamaChatRequest, request: Request):
             eval_duration=_ms_to_ns(max(0.0, rec.total_ms - rec.ttft_ms)),
         )
 
+    # Errors before the first token become a status code, not a cut stream.
+    stream = await prime(stream_chat(state, rec, ref, messages, params))
+
     async def lines() -> AsyncIterator[str]:
-        async for chunk in stream_chat(state, rec, ref, messages, params):
-            if chunk.text:
-                yield _line(
-                    {
-                        "model": ref,
-                        "created_at": _now(),
-                        "message": {"role": "assistant", "content": chunk.text},
-                        "done": False,
-                    }
-                )
-            if chunk.done:
-                yield _line(
-                    {
-                        "model": ref,
-                        "created_at": _now(),
-                        "message": {"role": "assistant", "content": ""},
-                        "done": True,
-                        "done_reason": chunk.finish_reason or "stop",
-                        "total_duration": _ms_to_ns(rec.total_ms),
-                        "prompt_eval_count": rec.prompt_tokens,
-                        "eval_count": rec.completion_tokens,
-                        "eval_duration": _ms_to_ns(max(0.0, rec.total_ms - rec.ttft_ms)),
-                    }
-                )
+        try:
+            async for chunk in stream:
+                if chunk.text:
+                    yield _line(
+                        {
+                            "model": ref,
+                            "created_at": _now(),
+                            "message": {"role": "assistant", "content": chunk.text},
+                            "done": False,
+                        }
+                    )
+                if chunk.done:
+                    yield _line(
+                        {
+                            "model": ref,
+                            "created_at": _now(),
+                            "message": {"role": "assistant", "content": ""},
+                            "done": True,
+                            "done_reason": chunk.finish_reason or "stop",
+                            "total_duration": _ms_to_ns(rec.total_ms),
+                            "prompt_eval_count": rec.prompt_tokens,
+                            "eval_count": rec.completion_tokens,
+                            "eval_duration": _ms_to_ns(max(0.0, rec.total_ms - rec.ttft_ms)),
+                        }
+                    )
+        except Exception as exc:
+            yield _line({"error": str(exc)})  # what Ollama itself sends mid-stream
 
     return StreamingResponse(lines(), media_type=NDJSON)
 
@@ -260,30 +267,35 @@ async def generate(body: OllamaGenerateRequest, request: Request):
             eval_count=rec.completion_tokens,
         )
 
+    stream = await prime(stream_generate(state, rec, ref, prompt, params))
+
     async def lines() -> AsyncIterator[str]:
-        async for chunk in stream_generate(state, rec, ref, prompt, params):
-            if chunk.text:
-                yield _line(
-                    {
-                        "model": ref,
-                        "created_at": _now(),
-                        "response": chunk.text,
-                        "done": False,
-                    }
-                )
-            if chunk.done:
-                yield _line(
-                    {
-                        "model": ref,
-                        "created_at": _now(),
-                        "response": "",
-                        "done": True,
-                        "done_reason": chunk.finish_reason or "stop",
-                        "total_duration": _ms_to_ns(rec.total_ms),
-                        "prompt_eval_count": rec.prompt_tokens,
-                        "eval_count": rec.completion_tokens,
-                    }
-                )
+        try:
+            async for chunk in stream:
+                if chunk.text:
+                    yield _line(
+                        {
+                            "model": ref,
+                            "created_at": _now(),
+                            "response": chunk.text,
+                            "done": False,
+                        }
+                    )
+                if chunk.done:
+                    yield _line(
+                        {
+                            "model": ref,
+                            "created_at": _now(),
+                            "response": "",
+                            "done": True,
+                            "done_reason": chunk.finish_reason or "stop",
+                            "total_duration": _ms_to_ns(rec.total_ms),
+                            "prompt_eval_count": rec.prompt_tokens,
+                            "eval_count": rec.completion_tokens,
+                        }
+                    )
+        except Exception as exc:
+            yield _line({"error": str(exc)})
 
     return StreamingResponse(lines(), media_type=NDJSON)
 

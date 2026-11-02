@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 
 from ..engine.base import ChatMessage
 from ..utils import parse_ref
-from .generate import build_params, collect, embed, stream_chat, stream_generate
+from .generate import build_params, collect, embed, prime, stream_chat, stream_generate
 from .schemas import (
     OAIChatRequest,
     OAIChatResponse,
@@ -55,6 +55,15 @@ def _created(manifest_created: str) -> int:
 def _sse(payload: dict[str, Any] | str) -> str:
     body = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
     return f"data: {body}\n\n"
+
+
+def _sse_error(exc: Exception) -> str:
+    """A failure after the stream started: OpenAI's error object, then no `[DONE]`.
+
+    The status line is already `200` by then, so this frame is the only way to say
+    the answer is incomplete. The OpenAI SDKs raise on an `error` frame.
+    """
+    return _sse({"error": {"message": str(exc), "type": "server_error"}})
 
 
 @router.get("/models", response_model=OAIModelList)
@@ -115,6 +124,9 @@ async def chat_completions(body: OAIChatRequest, request: Request):
             ),
         )
 
+    # Errors before the first token become a status code, not a cut stream.
+    stream = await prime(stream_chat(state, rec, ref, messages, params))
+
     async def events() -> AsyncIterator[str]:
         yield _sse(
             {
@@ -125,40 +137,44 @@ async def chat_completions(body: OAIChatRequest, request: Request):
                 "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
             }
         )
-        async for chunk in stream_chat(state, rec, ref, messages, params):
-            if chunk.text:
-                yield _sse(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": ref,
-                        "choices": [
-                            {"index": 0, "delta": {"content": chunk.text}, "finish_reason": None}
-                        ],
-                    }
-                )
-            if chunk.done:
-                yield _sse(
-                    {
-                        "id": completion_id,
-                        "object": "chat.completion.chunk",
-                        "created": created,
-                        "model": ref,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {},
-                                "finish_reason": chunk.finish_reason or "stop",
-                            }
-                        ],
-                        "usage": {
-                            "prompt_tokens": rec.prompt_tokens,
-                            "completion_tokens": rec.completion_tokens,
-                            "total_tokens": rec.prompt_tokens + rec.completion_tokens,
-                        },
-                    }
-                )
+        try:
+            async for chunk in stream:
+                if chunk.text:
+                    yield _sse(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": ref,
+                            "choices": [
+                                {"index": 0, "delta": {"content": chunk.text}, "finish_reason": None}
+                            ],
+                        }
+                    )
+                if chunk.done:
+                    yield _sse(
+                        {
+                            "id": completion_id,
+                            "object": "chat.completion.chunk",
+                            "created": created,
+                            "model": ref,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "delta": {},
+                                    "finish_reason": chunk.finish_reason or "stop",
+                                }
+                            ],
+                            "usage": {
+                                "prompt_tokens": rec.prompt_tokens,
+                                "completion_tokens": rec.completion_tokens,
+                                "total_tokens": rec.prompt_tokens + rec.completion_tokens,
+                            },
+                        }
+                    )
+        except Exception as exc:
+            yield _sse_error(exc)
+            return
         yield _sse("[DONE]")
 
     return StreamingResponse(events(), media_type="text/event-stream")
@@ -203,34 +219,40 @@ async def completions(body: OAICompletionRequest, request: Request):
             },
         }
 
+    stream = await prime(stream_generate(state, rec, ref, body.prompt, params))
+
     async def events() -> AsyncIterator[str]:
-        async for chunk in stream_generate(state, rec, ref, body.prompt, params):
-            if chunk.text:
-                yield _sse(
-                    {
-                        "id": completion_id,
-                        "object": "text_completion",
-                        "created": created,
-                        "model": ref,
-                        "choices": [{"index": 0, "text": chunk.text, "finish_reason": None}],
-                    }
-                )
-            if chunk.done:
-                yield _sse(
-                    {
-                        "id": completion_id,
-                        "object": "text_completion",
-                        "created": created,
-                        "model": ref,
-                        "choices": [
-                            {
-                                "index": 0,
-                                "text": "",
-                                "finish_reason": chunk.finish_reason or "stop",
-                            }
-                        ],
-                    }
-                )
+        try:
+            async for chunk in stream:
+                if chunk.text:
+                    yield _sse(
+                        {
+                            "id": completion_id,
+                            "object": "text_completion",
+                            "created": created,
+                            "model": ref,
+                            "choices": [{"index": 0, "text": chunk.text, "finish_reason": None}],
+                        }
+                    )
+                if chunk.done:
+                    yield _sse(
+                        {
+                            "id": completion_id,
+                            "object": "text_completion",
+                            "created": created,
+                            "model": ref,
+                            "choices": [
+                                {
+                                    "index": 0,
+                                    "text": "",
+                                    "finish_reason": chunk.finish_reason or "stop",
+                                }
+                            ],
+                        }
+                    )
+        except Exception as exc:
+            yield _sse_error(exc)
+            return
         yield _sse("[DONE]")
 
     return StreamingResponse(events(), media_type="text/event-stream")

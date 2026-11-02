@@ -8,12 +8,34 @@ you see in `/api/usage` are the numbers both of them produced.
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import aclosing
 from typing import AsyncIterator
 
 from ..engine.base import ChatMessage, Chunk, GenParams
+from ..engine.loader import ModelNotReady
+from ..store import StoreError
 from .state import AppState
 from .stream import to_async
 from .telemetry import RequestRecord
+
+#: Recorded when the client goes away mid-answer (nginx's "client closed request").
+STATUS_CLIENT_CLOSED = 499
+
+
+def _status_for(exc: Exception) -> int:
+    """The status the client was shown, so error rates by code are true.
+
+    Mirrors the exception handlers in `app.py`; recording every failure as 500
+    would hide the difference between a bad request and a broken server.
+    """
+    if isinstance(exc, StoreError):
+        return 404
+    if isinstance(exc, ModelNotReady):
+        return 503
+    if isinstance(exc, ValueError):
+        return 400
+    return 500
 
 
 def _record(state: AppState, rec: RequestRecord) -> None:
@@ -24,7 +46,12 @@ def _record(state: AppState, rec: RequestRecord) -> None:
         pass  # telemetry must never fail a response
     state.metrics.inc(
         "shilp_requests_total",
-        {"surface": rec.surface, "endpoint": rec.endpoint, "model": rec.model},
+        {
+            "surface": rec.surface,
+            "endpoint": rec.endpoint,
+            "model": rec.model,
+            "status": str(rec.status),
+        },
     )
     state.metrics.inc(
         "shilp_tokens_total",
@@ -63,10 +90,16 @@ async def stream_chat(
     """Stream a chat answer, recording the request whatever happens."""
     try:
         async with state.loader.acquire(ref) as engine:
-            async for chunk in to_async(engine.chat(messages, params)):
-                yield _track(rec, chunk)
-    except Exception:
-        rec.status = 500
+            # aclosing: stop the worker as soon as we stop reading, not when
+            # the garbage collector gets round to it.
+            async with aclosing(to_async(engine.chat(messages, params))) as chunks:
+                async for chunk in chunks:
+                    yield _track(rec, chunk)
+    except (asyncio.CancelledError, GeneratorExit):
+        rec.status = STATUS_CLIENT_CLOSED
+        raise
+    except Exception as exc:
+        rec.status = _status_for(exc)
         raise
     finally:
         _record(state, rec)
@@ -82,13 +115,47 @@ async def stream_generate(
     """Stream a raw completion, recording the request whatever happens."""
     try:
         async with state.loader.acquire(ref) as engine:
-            async for chunk in to_async(engine.generate(prompt, params)):
-                yield _track(rec, chunk)
-    except Exception:
-        rec.status = 500
+            # aclosing: stop the worker as soon as we stop reading, not when
+            # the garbage collector gets round to it.
+            async with aclosing(to_async(engine.generate(prompt, params))) as chunks:
+                async for chunk in chunks:
+                    yield _track(rec, chunk)
+    except (asyncio.CancelledError, GeneratorExit):
+        rec.status = STATUS_CLIENT_CLOSED
+        raise
+    except Exception as exc:
+        rec.status = _status_for(exc)
         raise
     finally:
         _record(state, rec)
+
+
+async def prime(source: AsyncIterator[Chunk]) -> AsyncIterator[Chunk]:
+    """Pull the first chunk now, then hand back a stream that replays it.
+
+    A streaming response commits to `200` the moment its headers go out. Every
+    failure that can happen before the first token — unknown model, a busy model
+    (503), a prompt that does not fit (400) — must therefore surface *before*
+    the response starts, or the client sees a cut connection instead of a status
+    code. Awaiting the first chunk in the route does exactly that: the exception
+    propagates to the normal handlers. The cost is that headers wait for the
+    first token, which is what a client is waiting for anyway.
+    """
+    try:
+        first = await source.__anext__()
+    except StopAsyncIteration:
+        first = None
+
+    async def replay() -> AsyncIterator[Chunk]:
+        try:
+            if first is not None:
+                yield first
+                async for chunk in source:
+                    yield chunk
+        finally:
+            await source.aclose()
+
+    return replay()
 
 
 async def collect(source: AsyncIterator[Chunk]) -> tuple[str, Chunk]:
