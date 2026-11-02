@@ -21,7 +21,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Protocol
 
-from .store import MT_CONFIG, MT_GGUF, MT_TEMPLATE, Layer, Manifest, Store
+from .store import (MT_CONFIG, MT_GGUF, MT_SAFETENSORS, MT_TEMPLATE, Layer,
+                    Manifest, Store)
 from .utils import MissingDependency, ShilpError, human_size
 
 #: Weights + the small files the loader and the converter both need.
@@ -235,6 +236,14 @@ def pull(
             stored = store.put_blob(path, move=True)
             manifest.layers.append(
                 Layer(stored.digest, stored.size, MT_GGUF, path.name)
+            )
+        elif lower.endswith(".safetensors"):
+            # Without this the weights of a raw HF repo are silently dropped and
+            # `convert` later fails with nothing to convert. MT_SAFETENSORS exists
+            # for exactly this.
+            stored = store.put_blob(path, move=True)
+            manifest.layers.append(
+                Layer(stored.digest, stored.size, MT_SAFETENSORS, path.name)
             )
         elif lower.endswith((".json", ".txt", ".model")) or "tokenizer" in lower:
             data = path.read_bytes()
