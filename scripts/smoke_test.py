@@ -96,8 +96,7 @@ def main() -> int:
         health = client.get("/health").json()
         check("GET /health", health["status"] == "ok", f"engine={health['engine']}")
         check("GET /", "shilp" in client.get("/").text)
-        check("GET /chat", 'id="composer"' in client.get("/chat").text)
-        check("GET /static/js/chat.js", client.get("/static/js/chat.js").status_code == 200)
+        check("GET /api/stats", "window" in client.get("/api/stats").json())
 
         tags = client.get("/api/tags").json()["models"]
         check("GET /api/tags", any(m["name"] == model for m in tags), f"{len(tags)} model(s)")

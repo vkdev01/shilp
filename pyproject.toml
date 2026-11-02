@@ -17,7 +17,6 @@ dependencies = [
     "huggingface_hub>=0.23",
     "safetensors>=0.4",
     "numpy>=1.26",
-    "jinja2>=3.1",
 ]
 
 [project.optional-dependencies]
@@ -38,7 +37,8 @@ shilp = "shilp.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"shilp.server" = ["templates/*.html", "static/css/*.css", "static/js/*.js"]
+# The Next.js export from `make ui`; absent until built, and the server says so.
+"shilp.server" = ["webui/**/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

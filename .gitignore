@@ -13,6 +13,9 @@ venv/
 .coverage
 htmlcov/
 
+# Built by `make ui` from web/
+src/shilp/server/webui/
+
 # Local state — models are never committed
 .shilp/
 *.gguf

@@ -13,6 +13,10 @@ curl localhost:8000/api/chat -H 'content-type: application/json' \
        "messages":[{"role":"user","content":"hello"}]}'           # 4. use it
 ```
 
+![shilp's web UI: live serving dashboard, API playground with per-reply metrics, models and request log](assets/shilp-ui.gif)
+
+<sub>Recorded against a real server: Gemma 3 1B Q4_K_M on llama.cpp (Metal, Apple Silicon), with a background load test. [MP4](assets/shilp-ui.mp4) · re-record with `make ui-record`.</sub>
+
 ---
 
 ## Why this exists
@@ -55,10 +59,23 @@ make up
 
 ```bash
 make setup    # venv, deps, .env, then report what this machine has
-make test     # 124 tests, no model, no network (7 skip without torch)
+make test     # 127 tests, no model, no network (7 skip without torch)
 make pull     # Gemma-3-1B-it Q4_K_M, ~800 MB
-make serve    # http://127.0.0.1:8000 — chat UI at /chat
+make serve    # http://127.0.0.1:8000 — dashboard at /, playground at /chat
 ```
+
+### The web UI
+
+A Next.js app in `web/`, exported to static files and served by `shilp serve` itself — no Node at runtime. `make setup` builds it when `npm` is on the path; otherwise run `make ui` (Node 20+). Without a build the API still works and `/` says how to get the UI.
+
+| Page | What it shows |
+|---|---|
+| `/` Overview | Requests, req/s, error rate, TTFT and end-to-end latency (p50/p90/p95/p99), decode tok/s, tokens generated — as KPIs and time series over 5m–24h; breakdowns by model, API surface, endpoint and status; in-flight streams, resident models, store size, uptime |
+| `/chat` Playground | Chat over either API surface, with TTFT, decode speed, token counts, a prefill/decode split and token cadence per reply; an inspector with the exact `curl` and the raw NDJSON/SSE |
+| `/models` | Every stored model with quantisation, size, residency and its last-24h serving numbers; `/api/show` metadata, Shilpfile and template |
+| `/requests` | The newest 500 telemetry rows, filterable, with a latency histogram and CSV export |
+
+Every number comes from `GET /api/stats` (one SQLite query plus percentiles in Python) or the public API. For UI work, `make ui-dev` serves it with hot reload on `:3000` and proxies the API to a server on `:8000`.
 
 Override what gets pulled and served without editing anything:
 
@@ -202,15 +219,15 @@ src/shilp/
     template.py     render Ollama-style templates to a prompt
   server/
     app.py          create_app, error translation, health, metrics
-    ui.py           browser pages: status at /, chat client at /chat
-    templates/      Jinja2 pages (base, status, chat)
-    static/         theme CSS (light + dark) and the chat/theme scripts
+    ui.py           /api/stats for the dashboard; serves the exported web UI at /
+    webui/          the Next.js export (built by `make ui`, not committed)
     routes_ollama.py  /api/chat, /api/generate, /api/tags, /api/pull, …
     routes_openai.py  /v1/chat/completions, /v1/models, /v1/embeddings
     generate.py     the single generation path both surfaces share
     stream.py       bridge a blocking generator to an async one, cancellable
     telemetry.py    one SQLite row per request
     metrics.py      Prometheus text, hand-written, no client library
+web/                Next.js + Tailwind UI: overview, playground, models, requests
 ```
 
 Every module opens with a doc comment saying what it is for and, where it matters, what it deliberately does not do.
@@ -231,7 +248,7 @@ Every module opens with a doc comment saying what it is for and, where it matter
 | New architectures | after a GGUF port | day one |
 | Debug a forward pass | read C++ | `print` the tensor |
 
-`fake` is the third: no model, deterministic output, and the whole HTTP surface works, which is how the 124 tests run without weights or a network.
+`fake` is the third: no model, deterministic output, and the whole HTTP surface works, which is how the 127 tests run without weights or a network.
 
 The `transformers` engine exists to make the boundary demonstrable rather than asserted — one new file, and `scripts/bare_inference.py` is the same code as a standalone script you can run without shilp at all.
 
@@ -271,7 +288,7 @@ Three consequences worth internalising. Quantisation is the largest single lever
 ## Testing
 
 ```bash
-make test      # 124 unit tests, no model, no network (7 skip without torch)
+make test      # 127 unit tests, no model, no network (7 skip without torch)
 make smoke     # boots a real uvicorn server and exercises every endpoint over HTTP
 make loadtest  # ARGS="--rate 0.5 --duration 60" against a running server
 make lint      # ruff, if installed

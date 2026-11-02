@@ -7,6 +7,7 @@ store, loader or hub.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -31,6 +32,7 @@ class AppState:
     hub: Hub | None = None
     #: Default model when a request omits one.
     default_model: str | None = None
+    started_at: float = field(default_factory=time.time)
     extra: dict[str, Any] = field(default_factory=dict)
 
     def resolve_model(self, requested: str | None) -> str:

@@ -10,6 +10,7 @@ completion tokens over generation time, excluding load and prompt processing.
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import threading
 import time
@@ -150,6 +151,159 @@ class Telemetry:
             ],
         }
 
+    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """The newest requests, newest first, for the dashboard's request log."""
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT {_COLUMNS} FROM requests ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [_row(r) for r in rows]
+
+    def window(self, seconds: float, *, buckets: int = 60) -> dict[str, Any]:
+        """Percentiles, breakdowns and a time series for the last `seconds`.
+
+        Percentiles are computed in Python over the window's rows: SQLite has no
+        percentile function, and a local server's hour is a few thousand rows.
+        """
+        now = time.time()
+        since = now - seconds
+        with self._lock:
+            rows = [
+                _row(r)
+                for r in self._conn.execute(
+                    f"SELECT {_COLUMNS} FROM requests WHERE ts >= ? ORDER BY ts LIMIT ?",
+                    (since, WINDOW_ROW_LIMIT),
+                ).fetchall()
+            ]
+
+        ok = [r for r in rows if r["status"] < 400]
+        errors = [r for r in rows if _is_error(r)]
+        ttft = [r["ttft_ms"] for r in ok if r["ttft_ms"] > 0]
+        latency = [r["total_ms"] for r in ok]
+        tps = [r["tok_per_s"] for r in ok if r["tok_per_s"] > 0]
+        completion = sum(r["completion_tokens"] for r in rows)
+
+        width = seconds / buckets
+        series = [
+            {"ts": since + i * width, "requests": 0, "errors": 0, "tokens": 0,
+             "_ttft": [], "_latency": [], "_tps": []}
+            for i in range(buckets)
+        ]
+        for r in rows:
+            b = series[min(buckets - 1, int((r["ts"] - since) / width))]
+            b["requests"] += 1
+            b["tokens"] += r["completion_tokens"]
+            if _is_error(r):
+                b["errors"] += 1
+            elif r["status"] < 400:
+                if r["ttft_ms"] > 0:
+                    b["_ttft"].append(r["ttft_ms"])
+                b["_latency"].append(r["total_ms"])
+                if r["tok_per_s"] > 0:
+                    b["_tps"].append(r["tok_per_s"])
+        for b in series:
+            b["ttft_p50_ms"] = _pct(b.pop("_ttft"), 50)
+            lat = b.pop("_latency")
+            b["latency_p50_ms"] = _pct(lat, 50)
+            b["latency_p95_ms"] = _pct(lat, 95)
+            b["tok_per_s"] = _mean(b.pop("_tps"))
+
+        return {
+            "seconds": seconds,
+            "bucket_seconds": width,
+            "requests": len(rows),
+            "errors": len(errors),
+            "cancelled": sum(1 for r in rows if r["status"] == 499),
+            "error_rate": round(len(errors) / len(rows), 4) if rows else 0.0,
+            "rps": round(len(rows) / seconds, 4),
+            "prompt_tokens": sum(r["prompt_tokens"] for r in rows),
+            "completion_tokens": completion,
+            "output_tok_per_s": round(completion / seconds, 3),
+            "ttft_ms": _dist(ttft),
+            "latency_ms": _dist(latency),
+            "tok_per_s": _dist(tps),
+            "by_model": _group(rows, "model"),
+            "by_surface": _group(rows, "surface"),
+            "by_endpoint": _group(rows, "endpoint"),
+            "by_status": _count(rows, "status"),
+            "series": series,
+        }
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+#: Caps the rows a dashboard window reads, so a long window cannot stall the server.
+WINDOW_ROW_LIMIT = 20_000
+
+_COLUMNS = (
+    "id, ts, surface, endpoint, model, stream, status, prompt_tokens,"
+    " completion_tokens, ttft_ms, total_ms, tok_per_s"
+)
+_KEYS = [c.strip() for c in _COLUMNS.split(",")]
+
+
+def _row(r: tuple) -> dict[str, Any]:
+    out = dict(zip(_KEYS, r))
+    out["stream"] = bool(out["stream"])
+    for k in ("ttft_ms", "total_ms", "tok_per_s"):
+        out[k] = round(out[k], 2)
+    return out
+
+
+def _is_error(r: dict[str, Any]) -> bool:
+    """A failure the server owns; 499 is the client hanging up, not an error."""
+    return r["status"] >= 400 and r["status"] != 499
+
+
+def _pct(values: list[float], p: float) -> float:
+    """Nearest-rank percentile; 0 for an empty list."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = max(0, math.ceil(p / 100 * len(ordered)) - 1)
+    return round(ordered[rank], 2)
+
+
+def _mean(values: list[float]) -> float:
+    return round(sum(values) / len(values), 2) if values else 0.0
+
+
+def _dist(values: list[float]) -> dict[str, float]:
+    return {
+        "avg": _mean(values),
+        "p50": _pct(values, 50),
+        "p90": _pct(values, 90),
+        "p95": _pct(values, 95),
+        "p99": _pct(values, 99),
+        "max": round(max(values), 2) if values else 0.0,
+    }
+
+
+def _group(rows: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for r in rows:
+        groups.setdefault(str(r[key]), []).append(r)
+    out = []
+    for name, items in groups.items():
+        ok = [r for r in items if r["status"] < 400]
+        out.append(
+            {
+                key: name,
+                "requests": len(items),
+                "errors": sum(1 for r in items if _is_error(r)),
+                "completion_tokens": sum(r["completion_tokens"] for r in items),
+                "ttft_p50_ms": _pct([r["ttft_ms"] for r in ok if r["ttft_ms"] > 0], 50),
+                "latency_p95_ms": _pct([r["total_ms"] for r in ok], 95),
+                "tok_per_s": _mean([r["tok_per_s"] for r in ok if r["tok_per_s"] > 0]),
+            }
+        )
+    return sorted(out, key=lambda g: g["requests"], reverse=True)
+
+
+def _count(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in rows:
+        counts[str(r[key])] = counts.get(str(r[key]), 0) + 1
+    return counts

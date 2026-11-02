@@ -1,4 +1,4 @@
-"""Assemble the app: state, two API routers, health, metrics and the browser UI.
+"""Assemble the app: state, two API routers, health, metrics and the web UI.
 
 `create_app` takes its collaborators as arguments. That one decision is what
 makes the whole HTTP surface testable: pass a temp `SHILP_HOME` and the `fake`
@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import dataclasses
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-from fastapi.staticfiles import StaticFiles
 
 from .. import __version__
 from ..config import Settings, get_settings
@@ -27,7 +27,7 @@ from .routes_ollama import router as ollama_router
 from .routes_openai import router as openai_router
 from .state import AppState
 from .telemetry import Telemetry
-from .ui import STATIC_DIR
+from .ui import mount_ui
 from .ui import router as ui_router
 
 
@@ -38,6 +38,7 @@ def create_app(
     hub: Hub | None = None,
     store: Store | None = None,
     loader: ModelLoader | None = None,
+    ui_dir: Path | None = None,
 ) -> FastAPI:
     """Build the ASGI app.
 
@@ -78,7 +79,6 @@ def create_app(
     app.include_router(ollama_router)
     app.include_router(openai_router)
     app.include_router(ui_router)
-    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
     # --- error translation --------------------------------------------
     # One place decides what a failure looks like over HTTP, so both surfaces
@@ -133,6 +133,7 @@ def create_app(
         """Prometheus text exposition."""
         return metrics.render()
 
+    mount_ui(app, ui_dir)
     return app
 
 

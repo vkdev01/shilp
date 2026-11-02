@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup venv env doctor install install-engine install-metal install-dev \
-        pull serve up demo test smoke loadtest lint fmt clean
+        pull serve up demo test smoke loadtest lint fmt clean ui ui-dev ui-typecheck ui-record
 
 # --- interpreter -------------------------------------------------------
 # Recursive (not :=) so that `make setup` picks up the venv it just created:
@@ -40,10 +40,12 @@ setup: venv env ## End-to-end install: venv, dependencies, .env, doctor
 	@echo "→ $(PLATFORM)"
 	PIP_USER=0 $(PY) -m pip install --quiet --upgrade pip
 	PIP_USER=0 $(METAL) $(PY) -m pip install -e ".[$(EXTRAS)]"
+	@command -v npm >/dev/null && $(MAKE) --no-print-directory ui \
+	  || echo "→ npm not found: skipping the web UI (the API works without it; see make ui)"
 	@echo ""
 	@$(PY) -m shilp.cli doctor
 	@echo ""
-	@echo "Next:  make test     # 124 tests, no model needed"
+	@echo "Next:  make test     # 127 tests, no model needed"
 	@echo "       make pull     # ~800 MB model from the Hub"
 	@echo "       make serve    # http://127.0.0.1:8000"
 	@echo "  or:  make up       # pull + serve in one step"
@@ -91,6 +93,18 @@ loadtest: ## Load-test a running server (ARGS="--rate 0.5 --duration 60" etc.)
 demo: ## Serve with the fake engine — the API with no model behind it
 	SHILP_ENGINE=fake $(PY) -m shilp.cli serve --port 8000
 
+ui: ## Build the Next.js UI into src/shilp/server/webui (needs Node 20+)
+	cd web && npm ci --no-audit --no-fund && npm run build
+
+ui-dev: ## Hot-reloading UI on :3000, proxying the API to a server on :8000
+	cd web && npm run dev
+
+ui-typecheck: ## Type-check the UI
+	cd web && npm run typecheck
+
+ui-record: ## Record assets/shilp-ui.{gif,mp4} from a running server (needs Chrome + ffmpeg)
+	cd web && npm run record -- --url=$(or $(URL),http://127.0.0.1:8000)
+
 lint: ## Ruff, if it is installed
 	@$(PY) -m ruff check src tests scripts 2>/dev/null || echo "ruff not installed (pip install ruff)"
 
@@ -98,6 +112,6 @@ fmt: ## Ruff format, if it is installed
 	@$(PY) -m ruff format src tests scripts 2>/dev/null || echo "ruff not installed (pip install ruff)"
 
 clean: ## Remove build artefacts and the venv
-	rm -rf build dist *.egg-info .pytest_cache
+	rm -rf build dist *.egg-info .pytest_cache web/.next web/out
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +
 	@echo "left .venv and .env alone; remove them by hand if you want a clean slate"
