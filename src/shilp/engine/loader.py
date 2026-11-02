@@ -12,6 +12,7 @@ for the same cold model trigger one load, not two.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import shutil
 import time
 from contextlib import asynccontextmanager
@@ -53,17 +54,23 @@ EngineFactory = Callable[[Manifest, Path], Engine]
 
 
 def _default_factory(settings: Settings) -> EngineFactory:
-    def build(manifest: Manifest, gguf_path: Path) -> Engine:
-        name = manifest.engine or settings.engine
-        if name == "fake":
-            return FakeEngine(manifest)
-        from .llamacpp import LlamaCppEngine
+    """Adapter over `load_engine`, so exactly one place knows the engine registry.
 
-        return LlamaCppEngine(
+    This used to hand-roll the choice (`if fake ... else LlamaCppEngine`), which
+    meant a third engine could be registered and still never be reached:
+    `SHILP_ENGINE=transformers` built a LlamaCppEngine and handed it a directory.
+    Delegating removes the second list of engines that had to be kept in sync.
+    """
+
+    def build(manifest: Manifest, weights_path: Path) -> Engine:
+        from . import load_engine  # local import: avoids a cycle at module load
+
+        return load_engine(
             manifest,
-            gguf_path,
+            weights_path,
             num_ctx=int(manifest.params.get("num_ctx", 4096)),
             threads=settings.threads,
+            engine=manifest.engine or settings.engine,
         )
 
     return build
@@ -126,7 +133,12 @@ class ModelLoader:
         """
         from ..export import materialise
 
-        digest = "-".join(layer.digest.split(":")[1][:8] for layer in manifest.layers[:1])
+        # Hash every layer, not just the first: layers[0] is not necessarily the
+        # weights, so keying on it alone would reuse a stale cache after a
+        # weight change that left the config untouched.
+        digest = hashlib.sha256(
+            "".join(sorted(layer.digest for layer in manifest.layers)).encode()
+        ).hexdigest()[:12]
         dest = self.store.home / "cache" / f"{manifest.name}-{manifest.tag}-{digest}"
         if not (dest / "config.json").is_file():
             if dest.exists():
