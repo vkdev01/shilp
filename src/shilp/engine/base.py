@@ -96,3 +96,12 @@ class Engine(Protocol):
 
 class EngineError(RuntimeError):
     """The backend failed while generating; surfaced to the client as a 500."""
+
+
+class ContextOverflow(EngineError, ValueError):
+    """The prompt does not fit in the model's context window.
+
+    A `ValueError` as well, so the server maps it to a 400: the request is wrong,
+    not the server. It is raised before any token is generated, which is what
+    lets a streaming response fail with a status code instead of a cut stream.
+    """
