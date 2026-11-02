@@ -62,6 +62,9 @@ class Settings:
     engine: str = "llamacpp"
     #: Threads handed to llama.cpp. 0 means "let the engine decide".
     threads: int = 0
+    #: Layers offloaded to the GPU (Metal/CUDA). -1 means all of them; 0 keeps
+    #: everything on the CPU. A build without a GPU backend ignores it.
+    gpu_layers: int = -1
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -76,6 +79,7 @@ class Settings:
             max_resident=int(os.environ.get("SHILP_MAX_RESIDENT", "1")),
             engine=os.environ.get("SHILP_ENGINE", "llamacpp"),
             threads=int(os.environ.get("SHILP_THREADS", "0")),
+            gpu_layers=int(os.environ.get("SHILP_GPU_LAYERS", "-1")),
         )
 
     # --- derived paths -------------------------------------------------

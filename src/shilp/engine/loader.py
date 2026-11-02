@@ -70,6 +70,7 @@ def _default_factory(settings: Settings) -> EngineFactory:
             weights_path,
             num_ctx=int(manifest.params.get("num_ctx", 4096)),
             threads=settings.threads,
+            gpu_layers=settings.gpu_layers,
             engine=manifest.engine or settings.engine,
         )
 

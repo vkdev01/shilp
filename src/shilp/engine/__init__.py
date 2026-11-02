@@ -16,7 +16,7 @@ ENGINES = {
 
 
 def load_engine(manifest, weights_path, *, num_ctx: int = 4096, threads: int = 0,
-                engine: str | None = None):
+                gpu_layers: int = -1, engine: str | None = None):
     """Build an engine for a manifest.
 
     Kept as a function so the loader can swap implementations without the server
@@ -30,7 +30,9 @@ def load_engine(manifest, weights_path, *, num_ctx: int = 4096, threads: int = 0
     if name == "llamacpp":
         from .llamacpp import LlamaCppEngine
 
-        return LlamaCppEngine(manifest, weights_path, num_ctx=num_ctx, threads=threads)
+        return LlamaCppEngine(
+            manifest, weights_path, num_ctx=num_ctx, threads=threads, gpu_layers=gpu_layers
+        )
     if name == "transformers":
         from .transformers_engine import TransformersEngine
 
