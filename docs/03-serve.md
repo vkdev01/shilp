@@ -262,4 +262,6 @@ Ballparks, not benchmarks. `shilp usage` reports your real numbers, which is why
 
 ## Next
 
+[Deployment and scaling](05-deploy.md) — what changes when other people call this, and what limits it.
+
 [Roadmap](04-roadmap.md) — what is deliberately missing and what to build next.
