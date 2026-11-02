@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 .PHONY: help setup venv env doctor install install-engine install-metal install-dev \
-        pull serve up demo test smoke lint fmt clean
+        pull serve up demo test smoke loadtest lint fmt clean
 
 # --- interpreter -------------------------------------------------------
 # Recursive (not :=) so that `make setup` picks up the venv it just created:
@@ -43,7 +43,7 @@ setup: venv env ## End-to-end install: venv, dependencies, .env, doctor
 	@echo ""
 	@$(PY) -m shilp.cli doctor
 	@echo ""
-	@echo "Next:  make test     # 110 tests, no model needed"
+	@echo "Next:  make test     # 124 tests, no model needed"
 	@echo "       make pull     # ~800 MB model from the Hub"
 	@echo "       make serve    # http://127.0.0.1:8000"
 	@echo "  or:  make up       # pull + serve in one step"
@@ -84,6 +84,9 @@ test: ## Run the unit suite (no model, no network)
 
 smoke: ## Boot a real server and exercise every endpoint over HTTP
 	$(PY) scripts/smoke_test.py
+
+loadtest: ## Load-test a running server (ARGS="--rate 0.5 --duration 60" etc.)
+	$(PY) scripts/loadtest.py $(ARGS)
 
 demo: ## Serve with the fake engine — the API with no model behind it
 	SHILP_ENGINE=fake $(PY) -m shilp.cli serve --port 8000
