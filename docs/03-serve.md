@@ -13,16 +13,6 @@ shilp serve --model qwen2.5-1.5b-instruct-gguf:q4_k_m
 
 Open `http://127.0.0.1:8000` in a browser for a status page: stored models, which one is resident, and the endpoints.
 
-Open `http://127.0.0.1:8000/chat` for a chat client. It calls the public API and nothing else, so it doubles as a manual test bench:
-
-- **API surface toggle** — send through Ollama `/api/chat` (NDJSON) or OpenAI `/v1/chat/completions` (SSE); the conversation carries over when you switch.
-- **Settings** — model, system prompt, temperature, max tokens, streaming on/off. They persist in `localStorage`.
-- **Per-reply stats** — completion tokens, tok/s, time to first token, wall time; *Stop* aborts mid-stream.
-- **Last request** — the exact call as a copyable `curl`, plus the raw response body or stream.
-- **Theme** — light and dark, following the OS until you toggle.
-
-Markup lives in `server/templates/` (Jinja2) and styling and scripts in `server/static/`; `server/ui.py` only gathers the data each page renders.
-
 ```bash
 shilp serve --engine fake --port 8000     # no model, deterministic output — for UI work
 SHILP_MAX_RESIDENT=2 shilp serve          # keep two models warm, if you have the RAM
@@ -33,10 +23,49 @@ SHILP_MAX_RESIDENT=2 shilp serve          # keep two models warm, if you have th
 | `SHILP_HOME` | `~/.shilp` | store, manifests, telemetry |
 | `SHILP_HOST` / `SHILP_PORT` | `127.0.0.1` / `8000` | bind address |
 | `SHILP_MAX_RESIDENT` | `1` | models kept in memory at once |
-| `SHILP_ENGINE` | `llamacpp` | `llamacpp` or `fake` |
+| `SHILP_ENGINE` | `llamacpp` | `llamacpp`, `transformers` or `fake` |
 | `SHILP_THREADS` | `0` (engine decides) | llama.cpp thread count |
 | `SHILP_LLAMACPP_DIR` | — | llama.cpp checkout, for convert/quantize |
 | `HF_TOKEN` | — | Hub token for gated repos |
+
+---
+
+## Choosing an engine
+
+Two real backends sit behind the same `Engine` protocol, so everything else in
+this document — both API surfaces, streaming, telemetry, eviction — is identical
+whichever you pick.
+
+```bash
+shilp serve --model qwen:q4_k_m                     # llama.cpp (default)
+shilp serve --model qwen:main --engine transformers # PyTorch, dense weights
+shilp serve --engine fake                           # no model at all
+```
+
+| | `llamacpp` | `transformers` |
+|---|---|---|
+| Weights | one GGUF file, quantised | a safetensors directory, dense |
+| Get a model | `shilp pull hf:org/model-GGUF:q4_k_m` | `shilp pull hf:org/model` |
+| Memory, 7B | ~4.4 GiB (Q4_K_M) | ~14 GiB (fp16) |
+| Decode, 7B on M2 Pro | ~43 tok/s ceiling | ~13 tok/s ceiling |
+| Install | compiles C++ (3–10 min) | `pip install -e ".[base]"` |
+| Apple GPU | Metal | no |
+| New architectures | after a GGUF port | day one |
+| Debug a forward pass | read C++ | `print` the tensor |
+
+**Why both ship.** `llamacpp` is the right default: quantisation is what makes a
+7B model fit on a laptop, and no Python path can match it. `transformers` exists
+because the boundary in `engine/base.py` should be demonstrable rather than
+asserted — one new file, no changes to the server — and because it is the only
+option for an architecture the GGUF ecosystem has not ported yet.
+
+The trade-off is quantified in [00-theory.md](00-theory.md) §5 and §8; the
+one-line summary is **3–7× the memory and 3–7× slower decode**, because decode is
+bandwidth-bound and dense weights are 3–7× larger.
+
+A model is not portable between the two: a GGUF cannot be read by `transformers`,
+and a safetensors directory cannot be served by llama.cpp without
+`shilp convert`. Each engine names the fix when handed the wrong shape.
 
 ---
 
